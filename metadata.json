@@ -1,0 +1,6 @@
+{
+  "name": "RHP Management System",
+  "description": "ระบบคำนวณและบริหารจัดการการปรับโครงสร้างสัญญาเช่าซื้อเครื่องจักร (Restructuring Hire Purchase) พร้อมเอกสาร PDF ภาษาไทยและฐานข้อมูล Google Sheets",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
