@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent } from 'react';
+import { useEffect, useState, type ChangeEvent } from 'react';
 import {
   CheckCircle2,
   Database,
@@ -11,22 +11,30 @@ import {
   X,
 } from 'lucide-react';
 import { apiClient, type SheetsTestResponse, type UserAuthProfile } from '../services/apiClient.ts';
-import type {
-  ConnectionStatus,
-  InterestMethod,
-  SystemConfig,
-  UserPermissionEntry,
-  UserRole,
+import type { SheetsOAuthSnapshot } from '../services/sheetsOAuthManager.ts';
+import {
+  ALL_USER_ROLES,
+  type ConnectionStatus,
+  type InterestMethod,
+  type SystemConfig,
+  type UserPermissionEntry,
+  type UserRole,
 } from '../types/rhp.ts';
+import { getDefaultRoleCapabilities } from '../utils/transactionLifecycle.ts';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import { GoogleSignInButton } from './GoogleSignInButton.tsx';
 
 interface SheetsSetupModalProps {
   open: boolean;
   onClose: () => void;
-  isAuthenticated: boolean;
+  isPortalAuthenticated: boolean;
+  hasSheetsAccess: boolean;
+  oAuthSnapshot: SheetsOAuthSnapshot;
+  reconnectLoading?: boolean;
+  authLoading?: boolean;
   userProfile: UserAuthProfile | null;
   onSignIn: () => Promise<void>;
+  onReconnectSheets: () => Promise<void>;
   connection: ConnectionStatus;
   config: SystemConfig;
   onDatabaseReady: () => Promise<void>;
@@ -38,9 +46,14 @@ type ModalTab = 'sheets' | 'policy' | 'apps_script';
 export function SheetsSetupModal({
   open,
   onClose,
-  isAuthenticated,
+  isPortalAuthenticated,
+  hasSheetsAccess,
+  oAuthSnapshot,
+  reconnectLoading = false,
+  authLoading = false,
   userProfile,
   onSignIn,
+  onReconnectSheets,
   connection,
   config,
   onDatabaseReady,
@@ -61,7 +74,7 @@ export function SheetsSetupModal({
   );
   const [draftUsers, setDraftUsers] = useState<UserPermissionEntry[]>(config.authorizedUsers);
   const [newUserEmail, setNewUserEmail] = useState('');
-  const [newUserRole, setNewUserRole] = useState<UserRole>('Supervisor');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('Risk Control');
 
   const [pendingConfirm, setPendingConfirm] = useState<{
     title: string;
@@ -71,9 +84,19 @@ export function SheetsSetupModal({
     action: () => Promise<void>;
   } | null>(null);
 
+  useEffect(() => {
+    if (open) {
+      setDraftCompanyName(config.companyName);
+      setDraftCompanyAddress(config.companyAddress);
+      setDraftLogo(config.companyLogoDataUrl);
+      setDraftInterestMethod(config.defaultInterestMethod);
+      setDraftUsers(config.authorizedUsers);
+    }
+  }, [open, config]);
+
   if (!open) return null;
 
-  const isAdmin = userProfile?.role === 'Admin';
+  const isSuperAdmin = userProfile?.role === 'Super Admin';
 
   const handleInitDatabase = () => {
     setPendingConfirm({
@@ -210,13 +233,18 @@ export function SheetsSetupModal({
     const email = newUserEmail.trim().toLowerCase();
     if (!email || !email.includes('@')) return;
     if (draftUsers.some((u) => u.email.toLowerCase() === email)) return;
+    const defaults = getDefaultRoleCapabilities(newUserRole);
     setDraftUsers((prev) => [
       ...prev,
       {
         email,
         role: newUserRole,
-        canOverrideAr: newUserRole === 'Admin' || newUserRole === 'Supervisor',
-        canApprove: newUserRole === 'Admin' || newUserRole === 'Supervisor',
+        accountStatus: 'Approved',
+        emailVerified: true,
+        canOverrideAr: defaults.canOverrideAr,
+        canApprove: defaults.canApprove,
+        canDelete: defaults.canDelete,
+        disabled: false,
       },
     ]);
     setNewUserEmail('');
@@ -357,21 +385,119 @@ function doPost(e) {
 
             {activeTab === 'sheets' && (
               <div className="space-y-6">
-                {!isAuthenticated ? (
+                {!isPortalAuthenticated ? (
                   <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
                     <h3 className="text-sm font-semibold text-amber-900">
-                      ขั้นตอนที่ 1: ยืนยันตัวตนด้วยบัญชี Google
+                      ขั้นตอนที่ 1: ยืนยันตัวตนเข้าสู่ระบบ RHP Portal (Firebase Auth)
                     </h3>
                     <p className="mt-1 text-xs leading-relaxed text-amber-800">
-                      กรุณาเข้าสู่ระบบด้วยบัญชี Google เพื่ออนุญาตให้แอปพลิเคชันสร้างและบันทึกข้อมูลลงในสเปรดชีต
-                      RHP_Restructuring_Database ของคุณ
+                      กรุณาเข้าสู่ระบบด้วยบัญชี Google ขององค์กรเพื่อเปิดใช้งาน RHP Portal
+                      และอนุญาตการเชื่อมต่อสเปรดชีต RHP_Restructuring_Database
                     </p>
                     <div className="mt-4">
-                      <GoogleSignInButton onClick={() => void onSignIn()} />
+                      <GoogleSignInButton onClick={() => void onSignIn()} disabled={authLoading} />
                     </div>
                   </div>
                 ) : (
                   <>
+                    {/* 2-Layer Authentication & Authorization Status Cards */}
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-200 bg-white p-4">
+                        <p className="text-[11px] font-semibold text-slate-500">
+                          1. Portal Authentication (Firebase Auth · LOCAL)
+                        </p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-700">
+                          เข้าสู่ระบบแล้ว ({userProfile?.role || 'Viewer'})
+                        </p>
+                        <p className="mt-0.5 truncate font-mono text-xs text-slate-600">
+                          {userProfile?.email}
+                        </p>
+                        <p className="mt-1 text-[11px] text-slate-500">
+                          การหมดอายุของ Google Sheets OAuth จะไม่ทำให้เซสชันนี้หลุด
+                        </p>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-white p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-semibold text-slate-500">
+                              2. Google Sheets Authorization
+                            </p>
+                            {oAuthSnapshot.authMode === 'service_account' ? (
+                              <>
+                                <p className="mt-1 text-sm font-semibold text-emerald-700">
+                                  Google Service Account (อัตโนมัติ)
+                                </p>
+                                <p className="mt-0.5 truncate font-mono text-xs text-slate-600">
+                                  {oAuthSnapshot.serviceAccountEmail || 'Configured on Server'}
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p
+                                  className={`mt-1 text-sm font-semibold ${
+                                    hasSheetsAccess ? 'text-emerald-700' : 'text-amber-700'
+                                  }`}
+                                >
+                                  {hasSheetsAccess
+                                    ? oAuthSnapshot.hasRefreshToken
+                                      ? 'OAuth เชื่อมต่อแล้ว (Auto-Refresh พร้อมใช้)'
+                                      : 'OAuth Token พร้อมใช้งาน'
+                                    : oAuthSnapshot.status === 'revoked'
+                                      ? 'สิทธิ์ OAuth ถูกเพิกถอน'
+                                      : 'สิทธิ์ OAuth หมดอายุ (ต้องเชื่อมต่อใหม่)'}
+                                </p>
+                                {oAuthSnapshot.expiresAtMs && (
+                                  <p className="mt-0.5 font-mono text-xs text-slate-600 tabular-nums">
+                                    หมดอายุ:{' '}
+                                    {new Date(oAuthSnapshot.expiresAtMs).toLocaleTimeString(
+                                      'th-TH',
+                                      { timeZone: 'Asia/Bangkok', hour12: false }
+                                    )}{' '}
+                                    (ต่ออายุอัตโนมัติล่วงหน้า 5 นาที)
+                                  </p>
+                                )}
+                              </>
+                            )}
+                          </div>
+
+                          {oAuthSnapshot.authMode !== 'service_account' && (
+                            <button
+                              type="button"
+                              onClick={() => void onReconnectSheets()}
+                              disabled={reconnectLoading}
+                              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              <RefreshCw
+                                className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`}
+                              />
+                              Reconnect Google
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {!hasSheetsAccess && oAuthSnapshot.authMode !== 'service_account' && (
+                      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+                        <span>
+                          {oAuthSnapshot.statusMessage ||
+                            'กรุณากด Reconnect Google เพื่อขอสิทธิ์ Google Sheets ก่อนสร้าง ทดสอบ หรือซิงก์สเปรดชีต'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => void onReconnectSheets()}
+                          disabled={reconnectLoading}
+                          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-amber-700 px-3.5 py-1.5 font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+                        >
+                          <RefreshCw
+                            className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`}
+                          />
+                          Reconnect Google
+                        </button>
+                      </div>
+                    )}
+
                     {/* Current Connection State */}
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
                       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -405,7 +531,7 @@ function doPost(e) {
                               <button
                                 type="button"
                                 onClick={() => void handleTestConnection()}
-                                disabled={busy}
+                                disabled={busy || !hasSheetsAccess}
                                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 disabled:opacity-50"
                               >
                                 <RefreshCw className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />
@@ -469,7 +595,7 @@ function doPost(e) {
                         <button
                           type="button"
                           onClick={handleInitDatabase}
-                          disabled={busy}
+                          disabled={busy || !hasSheetsAccess}
                           className="mt-4 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F] disabled:opacity-50"
                         >
                           <CheckCircle2 className="h-4 w-4" />
@@ -497,7 +623,7 @@ function doPost(e) {
                         <button
                           type="button"
                           onClick={handleConnectExisting}
-                          disabled={busy || !manualId.trim()}
+                          disabled={busy || !hasSheetsAccess || !manualId.trim()}
                           className="mt-4 whitespace-nowrap rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50"
                         >
                           เชื่อมต่อ Spreadsheet ID นี้
@@ -511,9 +637,9 @@ function doPost(e) {
 
             {activeTab === 'policy' && (
               <div className="space-y-6">
-                {!isAdmin && (
+                {!isSuperAdmin && (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
-                    คุณกำลังดูข้อมูลด้วยสิทธิ์ {userProfile?.role || 'Staff'} — เฉพาะผู้ดูแลระบบ (Admin)
+                    คุณกำลังดูข้อมูลด้วยสิทธิ์ {userProfile?.role || 'Viewer'} — เฉพาะผู้ดูแลระบบสูงสุด (Super Admin)
                     เท่านั้นที่สามารถแก้ไขนโยบายบริษัทและสิทธิ์ผู้ใช้งานได้
                   </div>
                 )}
@@ -527,7 +653,7 @@ function doPost(e) {
                         type="text"
                         value={draftCompanyName}
                         onChange={(e) => setDraftCompanyName(e.target.value)}
-                        disabled={!isAdmin}
+                        disabled={!isSuperAdmin}
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 disabled:bg-slate-50"
                       />
                     </div>
@@ -537,7 +663,7 @@ function doPost(e) {
                         type="text"
                         value={draftCompanyAddress}
                         onChange={(e) => setDraftCompanyAddress(e.target.value)}
-                        disabled={!isAdmin}
+                        disabled={!isSuperAdmin}
                         className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 disabled:bg-slate-50"
                       />
                     </div>
@@ -555,7 +681,7 @@ function doPost(e) {
                             <ImagePlus className="h-5 w-5" />
                           </div>
                         )}
-                        {isAdmin && (
+                        {isSuperAdmin && (
                           <div className="flex items-center gap-2">
                             <label className="cursor-pointer whitespace-nowrap rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
                               อัปโหลดโลโก้
@@ -591,7 +717,7 @@ function doPost(e) {
                         <button
                           key={method}
                           type="button"
-                          disabled={!isAdmin}
+                          disabled={!isSuperAdmin}
                           onClick={() => setDraftInterestMethod(method)}
                           className={`flex-1 whitespace-nowrap rounded-md px-3 py-2 text-xs font-semibold transition-colors ${
                             draftInterestMethod === method
@@ -626,6 +752,8 @@ function doPost(e) {
                           <th className="py-2 pr-4 font-semibold">บทบาท (Role)</th>
                           <th className="py-2 pr-4 font-semibold">สิทธิ์ปรับแก้ AR</th>
                           <th className="py-2 pr-4 font-semibold">สิทธิ์อนุมัติสัญญา</th>
+                          <th className="py-2 pr-4 font-semibold">สิทธิ์ลบรายการ</th>
+                          <th className="py-2 pr-4 font-semibold">ระงับสิทธิ์ (Disabled)</th>
                           <th className="py-2 text-right font-semibold">จัดการ</th>
                         </tr>
                       </thead>
@@ -636,17 +764,19 @@ function doPost(e) {
                             <td className="py-2.5 pr-4">
                               <select
                                 value={u.role}
-                                disabled={!isAdmin}
+                                disabled={!isSuperAdmin}
                                 onChange={(e) => {
                                   const role = e.target.value as UserRole;
+                                  const defaults = getDefaultRoleCapabilities(role);
                                   setDraftUsers((prev) =>
                                     prev.map((item, i) =>
                                       i === idx
                                         ? {
                                             ...item,
                                             role,
-                                            canOverrideAr: role !== 'Staff',
-                                            canApprove: role !== 'Staff',
+                                            canOverrideAr: defaults.canOverrideAr,
+                                            canApprove: defaults.canApprove,
+                                            canDelete: defaults.canDelete,
                                           }
                                         : item
                                     )
@@ -654,16 +784,18 @@ function doPost(e) {
                                 }}
                                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
                               >
-                                <option value="Staff">Staff</option>
-                                <option value="Supervisor">Supervisor</option>
-                                <option value="Admin">Admin</option>
+                                {ALL_USER_ROLES.map((r) => (
+                                  <option key={r} value={r}>
+                                    {r}
+                                  </option>
+                                ))}
                               </select>
                             </td>
                             <td className="py-2.5 pr-4">
                               <input
                                 type="checkbox"
                                 checked={u.canOverrideAr}
-                                disabled={!isAdmin}
+                                disabled={!isSuperAdmin}
                                 onChange={(e) =>
                                   setDraftUsers((prev) =>
                                     prev.map((item, i) =>
@@ -677,7 +809,7 @@ function doPost(e) {
                               <input
                                 type="checkbox"
                                 checked={u.canApprove}
-                                disabled={!isAdmin}
+                                disabled={!isSuperAdmin}
                                 onChange={(e) =>
                                   setDraftUsers((prev) =>
                                     prev.map((item, i) =>
@@ -687,8 +819,41 @@ function doPost(e) {
                                 }
                               />
                             </td>
+                            <td className="py-2.5 pr-4">
+                              <input
+                                type="checkbox"
+                                checked={u.role === 'Super Admin' ? true : Boolean(u.canDelete)}
+                                disabled={!isSuperAdmin || u.role === 'Super Admin'}
+                                onChange={(e) =>
+                                  setDraftUsers((prev) =>
+                                    prev.map((item, i) =>
+                                      i === idx ? { ...item, canDelete: e.target.checked } : item
+                                    )
+                                  )
+                                }
+                              />
+                            </td>
+                            <td className="py-2.5 pr-4">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(u.disabled)}
+                                disabled={
+                                  !isSuperAdmin ||
+                                  (u.role === 'Super Admin' &&
+                                    u.email.toLowerCase() ===
+                                      (userProfile?.email || '').toLowerCase())
+                                }
+                                onChange={(e) =>
+                                  setDraftUsers((prev) =>
+                                    prev.map((item, i) =>
+                                      i === idx ? { ...item, disabled: e.target.checked } : item
+                                    )
+                                  )
+                                }
+                              />
+                            </td>
                             <td className="py-2.5 text-right">
-                              {isAdmin && draftUsers.length > 1 && (
+                              {isSuperAdmin && draftUsers.length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -707,7 +872,7 @@ function doPost(e) {
                     </table>
                   </div>
 
-                  {isAdmin && (
+                  {isSuperAdmin && (
                     <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
                       <input
                         type="email"
@@ -721,9 +886,11 @@ function doPost(e) {
                         onChange={(e) => setNewUserRole(e.target.value as UserRole)}
                         className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs"
                       >
-                        <option value="Staff">Staff</option>
-                        <option value="Supervisor">Supervisor</option>
-                        <option value="Admin">Admin</option>
+                        {ALL_USER_ROLES.map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                          </option>
+                        ))}
                       </select>
                       <button
                         type="button"
@@ -737,7 +904,7 @@ function doPost(e) {
                   )}
                 </div>
 
-                {isAdmin && (
+                {isSuperAdmin && (
                   <div className="flex justify-end">
                     <button
                       type="button"

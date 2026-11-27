@@ -306,6 +306,10 @@ export function getBangkokParts(date: Date = new Date()): {
   };
 }
 
+export function getBangkokYear(date: Date = new Date()): string {
+  return getBangkokParts(date).year;
+}
+
 export function getBangkokYYMM(date: Date = new Date()): string {
   const p = getBangkokParts(date);
   return `${p.yy}${p.month}`;
@@ -322,7 +326,7 @@ export function formatBangkokTimestamp(date: Date = new Date()): string {
 }
 
 export function buildPdfFilename(contractId: string, transactionDate: string): string {
-  const normalizedId = contractId.trim().replace(/-/g, '_');
+  const normalizedId = contractId.trim().replace(/[\s-]+/g, '_');
   const compactDate = transactionDate.replace(/[^0-9]/g, '').slice(0, 8) || formatBangkokDate().replace(/-/g, '');
   return `${normalizedId}_${compactDate}.pdf`;
 }
@@ -340,6 +344,7 @@ export function findDuplicateHistory(
 
   const matches: DuplicateMatch[] = [];
   for (const tx of transactions) {
+    if (tx.isDeleted || tx.transactionStatus === 'Deleted') continue;
     if (excludeContractId && tx.rhpContractId === excludeContractId) continue;
 
     const matchedFields: ('machineSerialNumber' | 'originalContractNumber')[] = [];

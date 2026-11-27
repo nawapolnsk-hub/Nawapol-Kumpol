@@ -7,10 +7,11 @@ import {
   FileText,
   Lock,
   PlusCircle,
+  RefreshCw,
   Save,
   Unlock,
 } from 'lucide-react';
-import { apiClient, type UserAuthProfile } from '../services/apiClient.ts';
+import { ApiClientError, apiClient, type UserAuthProfile } from '../services/apiClient.ts';
 import {
   DEFAULT_INTEREST_RATES,
   DOWN_PAYMENT_PRESETS,
@@ -32,26 +33,33 @@ import {
   formatPercent,
   formatTHB,
 } from '../utils/rhpCalculator.ts';
+import { isDuplicateContractId } from '../utils/contractIdGenerator.ts';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import { PdfPreviewModal } from './PdfPreviewModal.tsx';
 
 interface RhpCalculatorViewProps {
-  isAuthenticated: boolean;
+  isPortalAuthenticated: boolean;
+  hasSheetsAccess: boolean;
+  reconnectLoading?: boolean;
   userProfile: UserAuthProfile | null;
   connection: ConnectionStatus;
   config: SystemConfig;
   transactions: RhpTransaction[];
   onRequireSetup: () => void;
+  onReconnectSheets: () => Promise<void>;
   onTransactionSaved: () => Promise<void>;
 }
 
 export function RhpCalculatorView({
-  isAuthenticated,
+  isPortalAuthenticated,
+  hasSheetsAccess,
+  reconnectLoading = false,
   userProfile,
   connection,
   config,
   transactions,
   onRequireSetup,
+  onReconnectSheets,
   onTransactionSaved,
 }: RhpCalculatorViewProps) {
   const [rhpContractId, setRhpContractId] = useState<string>('');
@@ -89,11 +97,21 @@ export function RhpCalculatorView({
   } | null>(null);
 
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [feedback, setFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+    requiresReconnect?: boolean;
+  } | null>(null);
   const [pdfModalOpen, setPdfModalOpen] = useState(false);
 
   const [confirmSave, setConfirmSave] = useState<{
     status: 'Draft' | 'Approved';
+  } | null>(null);
+
+  const [duplicateContractAlert, setDuplicateContractAlert] = useState<{
+    oldId: string;
+    newId: string;
+    message: string;
   } | null>(null);
 
   // Sync default interest method if config updates before user edits
@@ -161,9 +179,17 @@ export function RhpCalculatorView({
     customer.machineSerialNumber.trim().length > 0 &&
     customer.originalContractNumber.trim().length > 0;
 
+  const canCreateContract = Boolean(
+    userProfile?.canCreateContract ||
+      userProfile?.role === 'Super Admin' ||
+      userProfile?.role === 'Risk Control'
+  );
+
   const canSave =
-    isAuthenticated &&
+    isPortalAuthenticated &&
+    hasSheetsAccess &&
     connection.connected &&
+    canCreateContract &&
     Boolean(rhpContractId) &&
     customerComplete &&
     calc.validationErrors.length === 0 &&
@@ -195,7 +221,72 @@ export function RhpCalculatorView({
     await reserveNewContract();
   };
 
+  const handleDuplicateContractCollision = async (
+    duplicateId: string,
+    suggestedNewId?: string,
+    suggestedTimestamp?: string,
+    customMessage?: string
+  ) => {
+    let nextId = suggestedNewId || '';
+    let nextTimestamp = suggestedTimestamp || '';
+
+    if (!nextId) {
+      const res = await apiClient.reserveContractId();
+      nextId = res.contractId;
+      nextTimestamp = res.timestamp;
+    }
+
+    setRhpContractId(nextId);
+    if (nextTimestamp) {
+      setContractCreatedAt(nextTimestamp);
+    }
+    setSavedRecord(null);
+    setDuplicateContractAlert({
+      oldId: duplicateId,
+      newId: nextId,
+      message:
+        customMessage ||
+        'เลขที่สัญญานี้ถูกใช้งานแล้ว (This Contract ID has already been used.)',
+    });
+  };
+
+  const handleRequestSave = async (targetStatus: 'Draft' | 'Approved') => {
+    if (!canSave || saving) return;
+
+    if (isDuplicateContractId(rhpContractId, transactions)) {
+      setReservingId(true);
+      try {
+        await handleDuplicateContractCollision(rhpContractId);
+      } catch (err) {
+        setFeedback({
+          type: 'error',
+          text: err instanceof Error ? err.message : 'ไม่สามารถสร้างเลขที่สัญญาใหม่ได้',
+        });
+      } finally {
+        setReservingId(false);
+      }
+      return;
+    }
+
+    setConfirmSave({ status: targetStatus });
+  };
+
   const executeSaveTransaction = async (targetStatus: 'Draft' | 'Approved') => {
+    if (isDuplicateContractId(rhpContractId, transactions)) {
+      setReservingId(true);
+      try {
+        await handleDuplicateContractCollision(rhpContractId);
+      } catch (err) {
+        setFeedback({
+          type: 'error',
+          text: err instanceof Error ? err.message : 'ไม่สามารถสร้างเลขที่สัญญาใหม่ได้',
+        });
+      } finally {
+        setReservingId(false);
+      }
+      return;
+    }
+
     setSaving(true);
     setFeedback(null);
     try {
@@ -222,9 +313,33 @@ export function RhpCalculatorView({
         text: `บันทึกสัญญา ${res.transaction.rhpContractId} (สถานะ: ${res.transaction.transactionStatus}) ลง Google Sheets เรียบร้อยแล้ว`,
       });
     } catch (err) {
+      if (err instanceof ApiClientError && err.errorCode === 'DUPLICATE_CONTRACT_ID') {
+        try {
+          await handleDuplicateContractCollision(
+            err.details?.duplicateContractId || rhpContractId,
+            err.details?.newContractId,
+            err.details?.newTimestamp,
+            err.message
+          );
+          await onTransactionSaved();
+        } catch (reserveErr) {
+          setFeedback({
+            type: 'error',
+            text:
+              reserveErr instanceof Error
+                ? reserveErr.message
+                : 'เลขที่สัญญานี้ถูกใช้งานแล้ว และไม่สามารถสร้างเลขใหม่ได้',
+          });
+        }
+        return;
+      }
+
+      const requiresReconnect =
+        err instanceof ApiClientError && Boolean(err.requiresSheetsReconnect);
       setFeedback({
         type: 'error',
         text: err instanceof Error ? err.message : 'ไม่สามารถบันทึกข้อมูลลง Google Sheets ได้',
+        requiresReconnect,
       });
     } finally {
       setSaving(false);
@@ -258,47 +373,77 @@ export function RhpCalculatorView({
 
   return (
     <div className="space-y-6">
-      {/* Database prerequisite notice if not connected */}
-      {(!isAuthenticated || !connection.connected) && (
+      {/* Database prerequisite notice if not connected or Sheets OAuth needs reconnect */}
+      {(!isPortalAuthenticated || !hasSheetsAccess || !connection.connected) && (
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-amber-200 bg-amber-50 px-5 py-4">
           <div className="flex items-start gap-3">
             <Database className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
             <div>
               <p className="text-sm font-semibold text-amber-900">
-                {!isAuthenticated
-                  ? 'ยังไม่ได้เข้าสู่ระบบด้วยบัญชี Google'
-                  : 'ยังไม่ได้เชื่อมต่อฐานข้อมูล Google Sheets (RHP_Restructuring_Database)'}
+                {!isPortalAuthenticated
+                  ? 'ยังไม่ได้เข้าสู่ระบบ MAX SANY RHP PORTAL'
+                  : !hasSheetsAccess
+                    ? 'สิทธิ์การเชื่อมต่อ Google Sheets หมดอายุชั่วคราว (ข้อมูลที่กรอกยังคงอยู่)'
+                    : 'ยังไม่ได้เชื่อมต่อฐานข้อมูล Google Sheets (RHP_Restructuring_Database)'}
               </p>
               <p className="mt-0.5 text-xs text-amber-800">
-                คุณสามารถทดลองคำนวณตัวเลขได้ทันที แต่จำเป็นต้องเข้าสู่ระบบและเชื่อมต่อ Google Sheets
-                ก่อนบันทึกรายการและออกเอกสาร PDF อย่างเป็นทางการ
+                {!isPortalAuthenticated
+                  ? 'คุณสามารถทดลองคำนวณตัวเลขได้ทันที แต่จำเป็นต้องเข้าสู่ระบบและเชื่อมต่อ Google Sheets ก่อนบันทึกรายการและออกเอกสาร PDF อย่างเป็นทางการ'
+                  : !hasSheetsAccess
+                    ? 'กรุณากด Reconnect Google เพื่อต่ออายุสิทธิ์บันทึกข้อมูลลง Google Sheets โดยไม่ต้องออกจากระบบ'
+                    : 'คุณสามารถทดลองคำนวณตัวเลขได้ทันที แต่จำเป็นต้องเชื่อมต่อสเปรดชีต RHP_Restructuring_Database ก่อนบันทึกและออก PDF'}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onRequireSetup}
-            className="whitespace-nowrap rounded-lg bg-amber-700 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-800"
-          >
-            ตั้งค่าการเชื่อมต่อ Google Sheets
-          </button>
+          {isPortalAuthenticated && !hasSheetsAccess ? (
+            <button
+              type="button"
+              onClick={() => void onReconnectSheets()}
+              disabled={reconnectLoading}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-amber-700 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`} />
+              {reconnectLoading ? 'กำลังเชื่อมต่อใหม่...' : 'Reconnect Google'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onRequireSetup}
+              className="whitespace-nowrap rounded-lg bg-amber-700 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-800"
+            >
+              ตั้งค่าการเชื่อมต่อ Google Sheets
+            </button>
+          )}
         </div>
       )}
 
       {feedback && (
         <div
-          className={`flex items-center gap-2.5 rounded-xl border px-5 py-3.5 text-sm font-medium ${
+          className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-5 py-3.5 text-sm font-medium ${
             feedback.type === 'success'
               ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
               : 'border-red-200 bg-red-50 text-red-800'
           }`}
         >
-          {feedback.type === 'success' ? (
-            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-          ) : (
-            <AlertTriangle className="h-4 w-4 shrink-0 text-red-600" />
+          <div className="flex items-center gap-2.5">
+            {feedback.type === 'success' ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+            ) : (
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-600" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          {feedback.requiresReconnect && (
+            <button
+              type="button"
+              onClick={() => void onReconnectSheets()}
+              disabled={reconnectLoading}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-amber-700 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`} />
+              Reconnect Google
+            </button>
           )}
-          <span>{feedback.text}</span>
         </div>
       )}
 
@@ -313,7 +458,7 @@ export function RhpCalculatorView({
                   1. เลขที่สัญญาปรับโครงสร้างใหม่ (RHP Contract ID)
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-500">
-                  ระบบสร้างรหัสอัตโนมัติรูปแบบ RHP-YYMM-XXXXXX ป้องกันเลขซ้ำเมื่อใช้งานพร้อมกัน (Asia/Bangkok)
+                  ระบบสร้างรหัสอัตโนมัติรูปแบบ RHP YYYY-XXX (เริ่ม 001 ใหม่ทุกปีตามเวลา Asia/Bangkok) ป้องกันเลขซ้ำเมื่อใช้งานพร้อมกัน
                 </p>
               </div>
               <button
@@ -563,7 +708,7 @@ export function RhpCalculatorView({
                   ) : (
                     <span className="inline-flex items-center gap-1.5 text-xs text-slate-500">
                       <Lock className="h-3.5 w-3.5" />
-                      การปรับแก้ AR จำกัดเฉพาะ Supervisor / Admin
+                      การปรับแก้ AR จำกัดเฉพาะ Approver / Super Admin
                     </span>
                   )}
                 </div>
@@ -903,8 +1048,8 @@ export function RhpCalculatorView({
               <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <button
                   type="button"
-                  disabled={!canSave || saving}
-                  onClick={() => setConfirmSave({ status: 'Draft' })}
+                  disabled={!canSave || saving || reservingId}
+                  onClick={() => void handleRequestSave('Draft')}
                   className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F] disabled:cursor-not-allowed disabled:opacity-45"
                 >
                   <Save className="h-4 w-4" />
@@ -913,11 +1058,11 @@ export function RhpCalculatorView({
 
                 <button
                   type="button"
-                  disabled={!canSave || saving || !userProfile?.canApprove}
-                  onClick={() => setConfirmSave({ status: 'Approved' })}
+                  disabled={!canSave || saving || reservingId || !userProfile?.canApprove}
+                  onClick={() => void handleRequestSave('Approved')}
                   title={
                     !userProfile?.canApprove
-                      ? 'เฉพาะ Supervisor หรือ Admin เท่านั้นที่สามารถอนุมัติสัญญาได้'
+                      ? 'เฉพาะ Approver หรือ Super Admin เท่านั้นที่สามารถอนุมัติสัญญาได้'
                       : ''
                   }
                   className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-emerald-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-45"
@@ -1052,6 +1197,64 @@ export function RhpCalculatorView({
         schedule={savedRecord?.schedule || calc.schedule}
         onClose={() => setPdfModalOpen(false)}
       />
+
+      {/* Duplicate Contract ID Alert Pop-up Modal */}
+      {duplicateContractAlert && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="duplicate-contract-modal-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-amber-200 bg-white p-6 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="flex-1">
+                <h3
+                  id="duplicate-contract-modal-title"
+                  className="text-base font-semibold text-slate-900"
+                >
+                  พบเลขที่สัญญาซ้ำในฐานข้อมูล
+                </h3>
+                <p className="mt-1.5 text-sm font-medium text-amber-900">
+                  {duplicateContractAlert.message}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">เลขที่สัญญาเดิมที่ซ้ำ:</span>
+                <span className="font-mono font-semibold text-red-700 line-through tabular-nums">
+                  {duplicateContractAlert.oldId}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-600 font-medium">เลขที่สัญญาใหม่ที่สร้างให้:</span>
+                <span className="font-mono text-sm font-bold text-[#0F2942] tabular-nums">
+                  {duplicateContractAlert.newId}
+                </span>
+              </div>
+            </div>
+
+            <p className="mt-3 text-xs leading-relaxed text-slate-600">
+              ระบบได้สร้างเลขที่สัญญาใหม่ให้อัตโนมัติแล้ว โดยข้อมูลลูกค้าและรายละเอียดทางการเงินที่กรอกไว้ยังคงอยู่ครบถ้วน กรุณาตรวจสอบเลขที่สัญญาใหม่และกดบันทึกอีกครั้ง
+            </p>
+
+            <div className="mt-5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setDuplicateContractAlert(null)}
+                className="whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
+              >
+                รับทราบและใช้เลขที่สัญญาใหม่
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

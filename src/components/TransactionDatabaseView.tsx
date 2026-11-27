@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   Database,
   Edit3,
@@ -8,7 +9,9 @@ import {
   History,
   Lock,
   RefreshCw,
+  RotateCcw,
   Search,
+  Trash2,
   X,
 } from 'lucide-react';
 import { apiClient, type UserAuthProfile } from '../services/apiClient.ts';
@@ -19,11 +22,14 @@ import type {
   RhpTransaction,
 } from '../types/rhp.ts';
 import { calculateRhpFinancials, formatPercent, formatTHB } from '../utils/rhpCalculator.ts';
+import { canUserDeleteTransaction } from '../utils/transactionLifecycle.ts';
 import { ConfirmationModal } from './ConfirmationModal.tsx';
 import { PdfPreviewModal } from './PdfPreviewModal.tsx';
 
 interface TransactionDatabaseViewProps {
-  isAuthenticated: boolean;
+  isPortalAuthenticated: boolean;
+  hasSheetsAccess: boolean;
+  reconnectLoading?: boolean;
   userProfile: UserAuthProfile | null;
   connection: ConnectionStatus;
   transactions: RhpTransaction[];
@@ -32,10 +38,13 @@ interface TransactionDatabaseViewProps {
   loading: boolean;
   onRefresh: () => Promise<void>;
   onRequireSetup: () => void;
+  onReconnectSheets: () => Promise<void>;
 }
 
 export function TransactionDatabaseView({
-  isAuthenticated,
+  isPortalAuthenticated,
+  hasSheetsAccess,
+  reconnectLoading = false,
   userProfile,
   connection,
   transactions,
@@ -44,13 +53,16 @@ export function TransactionDatabaseView({
   loading,
   onRefresh,
   onRequireSetup,
+  onReconnectSheets,
 }: TransactionDatabaseViewProps) {
-  const [subTab, setSubTab] = useState<'records' | 'audit'>('records');
+  const [subTab, setSubTab] = useState<'records' | 'deleted' | 'audit'>('records');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDate, setFilterDate] = useState('');
   const [filterMonth, setFilterMonth] = useState('');
   const [filterYear, setFilterYear] = useState('');
-  const [filterStatus, setFilterStatus] = useState<'All' | 'Draft' | 'Approved'>('All');
+  const [filterStatus, setFilterStatus] = useState<
+    'All' | 'Draft' | 'Revision Required' | 'Approved' | 'Rejected'
+  >('All');
 
   const [selectedTx, setSelectedTx] = useState<RhpTransaction | null>(null);
   const [pdfTx, setPdfTx] = useState<RhpTransaction | null>(null);
@@ -62,23 +74,51 @@ export function TransactionDatabaseView({
   const [editReason, setEditReason] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
 
   const [confirmApproveTx, setConfirmApproveTx] = useState<RhpTransaction | null>(null);
   const [confirmAmendOpen, setConfirmAmendOpen] = useState(false);
 
+  // Soft Delete & Restore modal state
+  const [deletingTx, setDeletingTx] = useState<RhpTransaction | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
+  const [restoringTx, setRestoringTx] = useState<RhpTransaction | null>(null);
+  const [restoreReason, setRestoreReason] = useState('');
+
+  const isSuperAdmin = userProfile?.role === 'Super Admin';
+  const canEditDraft = Boolean(
+    userProfile?.canEditDraft ||
+      userProfile?.role === 'Super Admin' ||
+      userProfile?.role === 'Risk Control'
+  );
+
+  const activeTransactions = useMemo(
+    () => transactions.filter((tx) => !tx.isDeleted && tx.transactionStatus !== 'Deleted'),
+    [transactions]
+  );
+
+  const deletedTransactions = useMemo(
+    () =>
+      transactions
+        .filter((tx) => tx.isDeleted || tx.transactionStatus === 'Deleted')
+        .slice()
+        .reverse(),
+    [transactions]
+  );
+
   const availableYears = useMemo(() => {
     const years = new Set<string>();
-    for (const tx of transactions) {
+    for (const tx of activeTransactions) {
       if (tx.transactionDate.length >= 4) {
         years.add(tx.transactionDate.slice(0, 4));
       }
     }
     return Array.from(years).sort().reverse();
-  }, [transactions]);
+  }, [activeTransactions]);
 
   const filteredTransactions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return transactions
+    return activeTransactions
       .filter((tx) => {
         if (filterStatus !== 'All' && tx.transactionStatus !== filterStatus) return false;
         if (filterDate && tx.transactionDate !== filterDate) return false;
@@ -95,7 +135,7 @@ export function TransactionDatabaseView({
       })
       .slice()
       .reverse();
-  }, [transactions, searchQuery, filterStatus, filterDate, filterMonth, filterYear]);
+  }, [activeTransactions, searchQuery, filterStatus, filterDate, filterMonth, filterYear]);
 
   const getScheduleForTx = (tx: RhpTransaction): AmortizationRow[] => {
     const stored = schedulesByContract[tx.rhpContractId];
@@ -172,24 +212,103 @@ export function TransactionDatabaseView({
     }
   };
 
-  if (!isAuthenticated || !connection.connected) {
+  const openDeleteModal = (tx: RhpTransaction) => {
+    setDeletingTx(tx);
+    setDeleteReason('');
+    setActionError(null);
+    setActionNotice(null);
+  };
+
+  const handleConfirmSoftDelete = async () => {
+    if (!deletingTx || !deleteReason.trim()) return;
+    setActionBusy(true);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await apiClient.softDeleteTransaction(deletingTx.rhpContractId, deleteReason.trim());
+      const removedId = deletingTx.rhpContractId;
+      setDeletingTx(null);
+      setDeleteReason('');
+      if (selectedTx?.rhpContractId === removedId) {
+        setSelectedTx(null);
+      }
+      await onRefresh();
+      setActionNotice(`ลบรายการ ${removedId} เรียบร้อยแล้ว (Soft Delete พร้อมบันทึก Audit Log)`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'ไม่สามารถลบรายการปรับโครงสร้างสัญญาได้');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const openRestoreModal = (tx: RhpTransaction) => {
+    setRestoringTx(tx);
+    setRestoreReason('กู้คืนรายการปรับโครงสร้างสัญญาโดยผู้ดูแลระบบ');
+    setActionError(null);
+    setActionNotice(null);
+  };
+
+  const handleConfirmRestore = async () => {
+    if (!restoringTx) return;
+    setActionBusy(true);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      const res = await apiClient.restoreTransaction(
+        restoringTx.rhpContractId,
+        restoreReason.trim() || 'กู้คืนรายการปรับโครงสร้างสัญญาโดยผู้ดูแลระบบ'
+      );
+      const restoredId = restoringTx.rhpContractId;
+      setRestoringTx(null);
+      setRestoreReason('');
+      await onRefresh();
+      setActionNotice(
+        `กู้คืนรายการ ${restoredId} กลับเป็นสถานะ ${res.transaction.transactionStatus} เรียบร้อยแล้ว`
+      );
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'ไม่สามารถกู้คืนรายการได้');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  if (!isPortalAuthenticated || !connection.connected || !hasSheetsAccess) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
         <Database className="mx-auto h-10 w-10 text-slate-400" />
         <h3 className="mt-3 text-base font-semibold text-slate-900">
-          ยังไม่ได้เชื่อมต่อฐานข้อมูล Google Sheets
+          {!isPortalAuthenticated
+            ? 'กรุณาเข้าสู่ระบบ MAX SANY RHP PORTAL เพื่อเข้าถึงฐานข้อมูล'
+            : !hasSheetsAccess
+              ? 'สิทธิ์เชื่อมต่อ Google Sheets หมดอายุชั่วคราว'
+              : 'ยังไม่ได้เชื่อมต่อฐานข้อมูล Google Sheets'}
         </h3>
         <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-600">
-          เชื่อมต่อสเปรดชีต RHP_Restructuring_Database เพื่อค้นหา ดูรายละเอียดย้อนหลัง อนุมัติสัญญา และออกเอกสาร PDF
-          จากฐานข้อมูลจริงของบริษัท
+          {!isPortalAuthenticated
+            ? 'เข้าสู่ระบบด้วยบัญชี Google ขององค์กรเพื่อดูรายการปรับโครงสร้างสัญญาและออกเอกสาร PDF'
+            : !hasSheetsAccess
+              ? 'เซสชัน MAX SANY RHP PORTAL ของคุณยังคงทำงานอยู่ กรุณากด Reconnect Google เพื่อต่ออายุสิทธิ์เชื่อมต่อ Google Sheets'
+              : 'เชื่อมต่อสเปรดชีต RHP_Restructuring_Database เพื่อค้นหา ดูรายละเอียดย้อนหลัง อนุมัติสัญญา และออกเอกสาร PDF จากฐานข้อมูลจริงของบริษัท'}
         </p>
-        <button
-          type="button"
-          onClick={onRequireSetup}
-          className="mt-5 whitespace-nowrap rounded-lg bg-[#0F2942] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
-        >
-          ตั้งค่าและเชื่อมต่อ Google Sheets
-        </button>
+        {isPortalAuthenticated && !hasSheetsAccess ? (
+          <button
+            type="button"
+            onClick={() => void onReconnectSheets()}
+            disabled={reconnectLoading}
+            className="mt-5 inline-flex items-center gap-2 whitespace-nowrap rounded-lg bg-amber-700 px-5 py-2.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`} />
+            {reconnectLoading ? 'กำลังเชื่อมต่อใหม่...' : 'Reconnect Google'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onRequireSetup}
+            className="mt-5 whitespace-nowrap rounded-lg bg-[#0F2942] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
+          >
+            ตั้งค่าและเชื่อมต่อ Google Sheets
+          </button>
+        )}
       </div>
     );
   }
@@ -198,7 +317,7 @@ export function TransactionDatabaseView({
     <div className="space-y-5">
       {/* Header & Sub-tabs */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-1 rounded-lg bg-slate-200/70 p-1">
+        <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-200/70 p-1">
           <button
             type="button"
             onClick={() => setSubTab('records')}
@@ -208,8 +327,22 @@ export function TransactionDatabaseView({
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            รายการปรับโครงสร้างสัญญา ({transactions.length})
+            รายการปรับโครงสร้างสัญญา ({activeTransactions.length})
           </button>
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => setSubTab('deleted')}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-4 py-1.5 text-xs font-semibold transition-colors ${
+                subTab === 'deleted'
+                  ? 'bg-white text-red-700 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              รายการที่ถูกลบ ({deletedTransactions.length})
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setSubTab('audit')}
@@ -235,9 +368,31 @@ export function TransactionDatabaseView({
         </button>
       </div>
 
+      {actionNotice && (
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+          <span>{actionNotice}</span>
+          <button
+            type="button"
+            onClick={() => setActionNotice(null)}
+            className="rounded p-0.5 text-emerald-700 hover:bg-emerald-100"
+            aria-label="ปิดการแจ้งเตือน"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {actionError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
-          {actionError}
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="rounded p-0.5 text-red-600 hover:bg-red-100"
+            aria-label="ปิดข้อผิดพลาด"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 
@@ -303,14 +458,23 @@ export function TransactionDatabaseView({
                 <select
                   value={filterStatus}
                   onChange={(e) =>
-                    setFilterStatus(e.target.value as 'All' | 'Draft' | 'Approved')
+                    setFilterStatus(
+                      e.target.value as
+                        | 'All'
+                        | 'Draft'
+                        | 'Revision Required'
+                        | 'Approved'
+                        | 'Rejected'
+                    )
                   }
                   aria-label="กรองตามสถานะ"
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800"
                 >
                   <option value="All">ทุกสถานะ</option>
                   <option value="Draft">Draft (รออนุมัติ)</option>
+                  <option value="Revision Required">Revision Required (ส่งกลับแก้ไข)</option>
                   <option value="Approved">Approved (อนุมัติแล้ว)</option>
+                  <option value="Rejected">Rejected (ถูกปฏิเสธ)</option>
                 </select>
               </div>
             </div>
@@ -372,7 +536,11 @@ export function TransactionDatabaseView({
                             className={`font-semibold ${
                               tx.transactionStatus === 'Approved'
                                 ? 'text-emerald-700'
-                                : 'text-amber-700'
+                                : tx.transactionStatus === 'Rejected'
+                                  ? 'text-red-700'
+                                  : tx.transactionStatus === 'Revision Required'
+                                    ? 'text-[#0F2942]'
+                                    : 'text-amber-700'
                             }`}
                           >
                             {tx.transactionStatus}
@@ -396,17 +564,22 @@ export function TransactionDatabaseView({
                               <FileText className="h-3 w-3" />
                               PDF
                             </button>
-                            {tx.transactionStatus === 'Draft' && userProfile?.canApprove && (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmApproveTx(tx)}
-                                className="inline-flex items-center gap-1 rounded bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-800"
-                              >
-                                <CheckCircle2 className="h-3 w-3" />
-                                อนุมัติ
-                              </button>
-                            )}
-                            {(tx.transactionStatus === 'Draft' || userProfile?.canApprove) && (
+                            {(tx.transactionStatus === 'Draft' ||
+                              tx.transactionStatus === 'Revision Required') &&
+                              userProfile?.canApprove && (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmApproveTx(tx)}
+                                  className="inline-flex items-center gap-1 rounded bg-emerald-700 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-800"
+                                >
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  อนุมัติ
+                                </button>
+                              )}
+                            {(((tx.transactionStatus === 'Draft' ||
+                              tx.transactionStatus === 'Revision Required') &&
+                              canEditDraft) ||
+                              (tx.transactionStatus === 'Approved' && userProfile?.canApprove)) && (
                               <button
                                 type="button"
                                 onClick={() => openEditModal(tx)}
@@ -414,7 +587,7 @@ export function TransactionDatabaseView({
                                 title={
                                   tx.transactionStatus === 'Approved'
                                     ? 'ขอแก้ไขรายการที่อนุมัติแล้ว (บันทึก Audit Log)'
-                                    : 'แก้ไขรายการ Draft'
+                                    : 'แก้ไขรายการสัญญาเพื่อนำเสนอใหม่อีกครั้ง'
                                 }
                               >
                                 {tx.transactionStatus === 'Approved' ? (
@@ -423,6 +596,17 @@ export function TransactionDatabaseView({
                                   <Edit3 className="h-3 w-3" />
                                 )}
                                 แก้ไข
+                              </button>
+                            )}
+                            {canUserDeleteTransaction(userProfile, tx) && (
+                              <button
+                                type="button"
+                                onClick={() => openDeleteModal(tx)}
+                                className="inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50"
+                                title="ลบรายการ (Soft Delete)"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                ลบ
                               </button>
                             )}
                           </div>
@@ -435,6 +619,83 @@ export function TransactionDatabaseView({
             )}
           </div>
         </>
+      ) : subTab === 'deleted' && isSuperAdmin ? (
+        /* Admin Deleted Records Table */
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 bg-slate-50 px-5 py-3.5">
+            <h3 className="text-xs font-semibold text-slate-900">
+              รายการที่ถูกลบชั่วคราว (Soft Deleted Records — เฉพาะผู้ดูแลระบบ)
+            </h3>
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              ข้อมูลและตารางค่างวดยังคงถูกเก็บรักษาใน Google Sheets สามารถกดกู้คืนเพื่อนำกลับมาใช้งานในสถานะเดิมได้
+            </p>
+          </div>
+          {deletedTransactions.length === 0 ? (
+            <div className="p-10 text-center text-xs text-slate-500">
+              ไม่มีรายการที่ถูกลบในฐานข้อมูล
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold">เลขที่สัญญา RHP</th>
+                    <th className="px-4 py-3 font-semibold">ลูกค้า / สัญญาเดิม</th>
+                    <th className="px-4 py-3 font-semibold">สถานะก่อนลบ</th>
+                    <th className="px-4 py-3 font-semibold">วันเวลาที่ลบ</th>
+                    <th className="px-4 py-3 font-semibold">ผู้ลบ</th>
+                    <th className="px-4 py-3 font-semibold">เหตุผลการลบ</th>
+                    <th className="px-4 py-3 text-right font-semibold">จัดการ</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {deletedTransactions.map((tx) => (
+                    <tr key={tx.rhpContractId} className="hover:bg-slate-50/80">
+                      <td className="px-4 py-3 font-mono font-semibold text-slate-700 whitespace-nowrap">
+                        {tx.rhpContractId}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-slate-900">{tx.customerName}</div>
+                        <div className="font-mono text-[11px] text-slate-500">
+                          {tx.customerId} · Orig: {tx.originalContractNumber}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap font-semibold text-slate-700">
+                        {tx.previousStatus || (tx.approvedBy ? 'Approved' : 'Draft')}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-slate-600 whitespace-nowrap tabular-nums">
+                        {tx.deletedAt || tx.lastUpdated}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-slate-700">{tx.deletedBy || '-'}</td>
+                      <td className="px-4 py-3 text-slate-700">{tx.deletionReason || '-'}</td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTx(tx)}
+                            className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                          >
+                            <Eye className="h-3 w-3" />
+                            ดูรายละเอียด
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openRestoreModal(tx)}
+                            disabled={actionBusy}
+                            className="inline-flex items-center gap-1 rounded bg-[#0F2942] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#1E3A5F] disabled:opacity-50"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            กู้คืน (Restore)
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       ) : (
         /* Audit Log Table */
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -735,6 +996,196 @@ export function TransactionDatabaseView({
           void handleCommitAmendment();
         }}
       />
+
+      {/* Bilingual Soft Delete Confirmation Modal */}
+      {deletingTx && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-modal-title"
+        >
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-lg bg-red-100 p-2 text-red-700">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 id="delete-modal-title" className="text-base font-semibold text-slate-900">
+                    คุณต้องการลบรายการปรับโครงสร้างสัญญานี้ใช่หรือไม่?
+                  </h3>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    Are you sure you want to delete this restructuring transaction?
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeletingTx(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                aria-label="ปิดหน้าต่าง"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5 text-xs">
+              <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">เลขที่สัญญา RHP (RHP Contract ID):</span>
+                  <span className="font-mono font-bold text-[#0F2942]">{deletingTx.rhpContractId}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">รหัสลูกค้า (Customer ID):</span>
+                  <span className="font-mono font-semibold text-slate-900">{deletingTx.customerId}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">ชื่อผู้เช่าซื้อ (Customer Name):</span>
+                  <span className="font-semibold text-slate-900">{deletingTx.customerName}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">เลขที่สัญญาเดิม (Original Contract Number):</span>
+                  <span className="font-mono font-semibold text-slate-900">
+                    {deletingTx.originalContractNumber}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500">สถานะปัจจุบัน (Current Status):</span>
+                  <span
+                    className={`font-semibold ${
+                      deletingTx.transactionStatus === 'Approved'
+                        ? 'text-emerald-700'
+                        : 'text-amber-700'
+                    }`}
+                  >
+                    {deletingTx.transactionStatus}
+                  </span>
+                </div>
+              </div>
+
+              {deletingTx.transactionStatus === 'Approved' ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-800">
+                  คำเตือน: สัญญานี้ได้รับการอนุมัติแล้ว (Approved) การลบแบบ Soft Delete จะเก็บข้อมูลเดิมและตารางค่างวดไว้ในฐานข้อมูลพร้อมบันทึกประวัติใน Audit_Log
+                </div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-600">
+                  ระบบจะเปลี่ยนสถานะเป็น Deleted (Soft Delete) เพื่อซ่อนจากหน้าหลัก โดยยังคงเก็บแถวข้อมูลและตารางผ่อนชำระไว้เพื่อการตรวจสอบและกู้คืนโดยผู้ดูแลระบบ
+                </div>
+              )}
+
+              <div>
+                <label className="block font-semibold text-slate-700">
+                  เหตุผลในการลบ (Deletion Reason) <span className="text-red-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  placeholder="ระบุเหตุผลในการลบรายการเพื่อบันทึกใน Audit_Log..."
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-red-600 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-slate-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setDeletingTx(null)}
+                disabled={actionBusy}
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                ยกเลิก (Cancel)
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmSoftDelete()}
+                disabled={actionBusy || !deleteReason.trim()}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {actionBusy ? 'กำลังลบ...' : 'ยืนยันการลบ (Confirm Delete)'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Restore Confirmation Modal */}
+      {restoringTx && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="restore-modal-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
+              <div>
+                <h3 id="restore-modal-title" className="text-base font-semibold text-slate-900">
+                  ยืนยันการกู้คืนรายการ ({restoringTx.rhpContractId})
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Restore deleted transaction back to active status
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRestoringTx(null)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5 text-xs">
+              <div className="space-y-1.5 rounded-lg border border-slate-200 bg-slate-50 p-3 text-slate-700">
+                <div>
+                  ลูกค้า: <span className="font-semibold text-slate-900">{restoringTx.customerName}</span> (
+                  {restoringTx.customerId})
+                </div>
+                <div>
+                  สถานะที่จะกู้คืนกลับ:{' '}
+                  <span className="font-semibold text-[#0F2942]">
+                    {restoringTx.previousStatus || (restoringTx.approvedBy ? 'Approved' : 'Draft')}
+                  </span>
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700">
+                  เหตุผลในการกู้คืน (บันทึกใน Audit_Log)
+                </label>
+                <input
+                  type="text"
+                  value={restoreReason}
+                  onChange={(e) => setRestoreReason(e.target.value)}
+                  className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 border-t border-slate-100 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setRestoringTx(null)}
+                disabled={actionBusy}
+                className="whitespace-nowrap rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmRestore()}
+                disabled={actionBusy}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E3A5F] disabled:opacity-50"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {actionBusy ? 'กำลังกู้คืน...' : 'ยืนยันการกู้คืน (Restore)'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PdfPreviewModal
         open={Boolean(pdfTx)}

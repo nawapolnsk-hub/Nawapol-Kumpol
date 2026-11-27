@@ -9,6 +9,7 @@ import type {
   UserPermissionEntry,
 } from '../types/rhp.ts';
 import { formatBangkokTimestamp } from '../utils/rhpCalculator.ts';
+import { normalizeUserEntry } from '../utils/transactionLifecycle.ts';
 
 export const SPREADSHEET_NAME = 'RHP_Restructuring_Database';
 
@@ -43,6 +44,11 @@ export const TRANSACTION_HEADERS = [
   'Created By',
   'Approved By',
   'Last Updated',
+  'Is Deleted',
+  'Deleted At',
+  'Deleted By',
+  'Deletion Reason',
+  'Previous Status',
 ];
 
 export const AMORTIZATION_HEADERS = [
@@ -81,15 +87,49 @@ interface SheetApiErrorPayload {
   };
 }
 
+export class SheetsApiError extends Error {
+  status: number;
+  errorCode:
+    | 'ACCESS_TOKEN_EXPIRED'
+    | 'INSUFFICIENT_PERMISSION'
+    | 'SHEETS_API_UNAVAILABLE'
+    | 'NETWORK_ERROR'
+    | 'UNKNOWN_ERROR';
+
+  constructor(
+    message: string,
+    status: number,
+    errorCode:
+      | 'ACCESS_TOKEN_EXPIRED'
+      | 'INSUFFICIENT_PERMISSION'
+      | 'SHEETS_API_UNAVAILABLE'
+      | 'NETWORK_ERROR'
+      | 'UNKNOWN_ERROR'
+  ) {
+    super(message);
+    this.status = status;
+    this.errorCode = errorCode;
+  }
+}
+
 async function sheetsFetch<T>(url: string, accessToken: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+    });
+  } catch {
+    throw new SheetsApiError(
+      'ไม่สามารถเชื่อมต่อ Google Sheets API ได้ กรุณาตรวจสอบการเชื่อมต่อเครือข่าย',
+      503,
+      'NETWORK_ERROR'
+    );
+  }
 
   const text = await res.text();
   let json: unknown = {};
@@ -103,10 +143,33 @@ async function sheetsFetch<T>(url: string, accessToken: string, init?: RequestIn
 
   if (!res.ok) {
     const errPayload = json as SheetApiErrorPayload;
-    const msg = errPayload?.error?.message || `Google Sheets API Error (${res.status})`;
-    const error = new Error(msg) as Error & { status?: number };
-    error.status = res.status;
-    throw error;
+    const rawMsg = errPayload?.error?.message || `Google Sheets API Error (${res.status})`;
+
+    if (res.status === 401) {
+      throw new SheetsApiError(
+        'สิทธิ์เชื่อมต่อ Google Sheets หมดอายุหรือไม่ถูกต้อง กรุณากด Reconnect Google (เซสชัน RHP Portal และข้อมูลที่กรอกยังคงอยู่)',
+        401,
+        'ACCESS_TOKEN_EXPIRED'
+      );
+    }
+
+    if (res.status === 403) {
+      throw new SheetsApiError(
+        `ไม่มีสิทธิ์เข้าถึงไฟล์ Google Sheets นี้ (${rawMsg}) กรุณาตรวจสอบสิทธิ์การแชร์ไฟล์หรือบัญชีผู้ใช้งาน`,
+        403,
+        'INSUFFICIENT_PERMISSION'
+      );
+    }
+
+    if (res.status === 429 || res.status >= 500) {
+      throw new SheetsApiError(
+        'บริการ Google Sheets ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้ง',
+        res.status >= 500 ? 503 : 429,
+        'SHEETS_API_UNAVAILABLE'
+      );
+    }
+
+    throw new SheetsApiError(rawMsg, res.status, 'UNKNOWN_ERROR');
   }
 
   return json as T;
@@ -218,8 +281,8 @@ export async function ensureHeadersAndDefaults(
 
   const updatedMeta = missingTabs.length > 0 ? await getSpreadsheetMetadata(accessToken, spreadsheetId) : meta;
 
-  // Check first row of each tab
-  const ranges = requiredTabs.map((t) => `${t}!A1:Z1`).join('&ranges=');
+  // Check first row of each tab (including extended soft-delete columns A1:AD1)
+  const ranges = requiredTabs.map((t) => `${t}!A1:AD1`).join('&ranges=');
   const batchGet = await sheetsFetch<{
     valueRanges?: Array<{ range: string; values?: string[][] }>;
   }>(
@@ -242,7 +305,7 @@ export async function ensureHeadersAndDefaults(
   for (let i = 0; i < requiredTabs.length; i++) {
     const tab = requiredTabs[i];
     const existingRow = batchGet.valueRanges?.[i]?.values?.[0];
-    if (!existingRow || existingRow.length === 0) {
+    if (!existingRow || existingRow.length < expectedHeaders[tab].length) {
       valueUpdates.push({
         range: `${tab}!A1`,
         values: [expectedHeaders[tab]],
@@ -323,7 +386,7 @@ export async function ensureHeadersAndDefaults(
 function buildConfigRows(config: SystemConfig, timestamp: string, actor: string): string[][] {
   return [
     ['Contract ID Prefix', config.contractIdPrefix, 'Prefix for generated RHP contracts', timestamp, actor],
-    ['Running Number', JSON.stringify(config.runningNumbers), 'Monthly sequence map by YYMM', timestamp, actor],
+    ['Running Number', JSON.stringify(config.runningNumbers), 'Annual/legacy sequence map by YYYY / YYMM', timestamp, actor],
     ['Default Interest Method', config.defaultInterestMethod, 'Company default interest method', timestamp, actor],
     ['Available Installment Periods', JSON.stringify(config.availableInstallmentPeriods), 'Allowed installment months', timestamp, actor],
     ['Down Payment Options', JSON.stringify(config.downPaymentOptions), 'Preset down payment percentages', timestamp, actor],
@@ -344,7 +407,7 @@ export async function readAllDatabaseData(
   auditLogs: AuditLogEntry[];
 }> {
   const ranges = [
-    `${SHEET_NAMES.TRANSACTIONS}!A2:W`,
+    `${SHEET_NAMES.TRANSACTIONS}!A2:AB`,
     `${SHEET_NAMES.AMORTIZATION}!A2:G`,
     `${SHEET_NAMES.CONFIG}!A2:E`,
     `${SHEET_NAMES.AUDIT}!A2:G`,
@@ -368,31 +431,58 @@ export async function readAllDatabaseData(
 
   const transactions: RhpTransaction[] = txRows
     .filter((r) => r[2])
-    .map((r) => ({
-      timestamp: r[0] || '',
-      transactionDate: r[1] || '',
-      rhpContractId: r[2] || '',
-      customerId: r[3] || '',
-      customerName: r[4] || '',
-      machineSerialNumber: r[5] || '',
-      originalContractNumber: r[6] || '',
-      machineCost: Number(r[7]) || 0,
-      processingFee: Number(r[8]) || 0,
-      ar: Number(r[9]) || 0,
-      interestRate: Number(r[10]) || 0,
-      interestMethod: (r[11] === 'Reducing Balance' ? 'Reducing Balance' : 'Flat Rate') as InterestMethod,
-      installmentPeriod: (Number(r[12]) || 12) as InstallmentPeriod,
-      downPaymentPercentage: Number(r[13]) || 0,
-      downPaymentAmount: Number(r[14]) || 0,
-      financedPrincipal: Number(r[15]) || 0,
-      totalInterest: Number(r[16]) || 0,
-      totalRepayment: Number(r[17]) || 0,
-      monthlyInstallment: Number(r[18]) || 0,
-      transactionStatus: (r[19] === 'Approved' ? 'Approved' : 'Draft') as TransactionStatus,
-      createdBy: r[20] || '',
-      approvedBy: r[21] || '',
-      lastUpdated: r[22] || '',
-    }));
+    .map((r) => {
+      const rawStatus = String(r[19] || '').trim();
+      const isDeletedCol = String(r[23] || '').trim().toUpperCase() === 'TRUE';
+      const isDeleted = isDeletedCol || rawStatus === 'Deleted';
+      const transactionStatus: TransactionStatus = isDeleted
+        ? 'Deleted'
+        : rawStatus === 'Approved'
+          ? 'Approved'
+          : rawStatus === 'Rejected'
+            ? 'Rejected'
+            : rawStatus === 'Revision Required'
+              ? 'Revision Required'
+              : 'Draft';
+      const prevStatusRaw = String(r[27] || '').trim();
+      const previousStatus =
+        prevStatusRaw === 'Approved'
+          ? 'Approved'
+          : prevStatusRaw === 'Draft'
+            ? 'Draft'
+            : undefined;
+
+      return {
+        timestamp: r[0] || '',
+        transactionDate: r[1] || '',
+        rhpContractId: r[2] || '',
+        customerId: r[3] || '',
+        customerName: r[4] || '',
+        machineSerialNumber: r[5] || '',
+        originalContractNumber: r[6] || '',
+        machineCost: Number(r[7]) || 0,
+        processingFee: Number(r[8]) || 0,
+        ar: Number(r[9]) || 0,
+        interestRate: Number(r[10]) || 0,
+        interestMethod: (r[11] === 'Reducing Balance' ? 'Reducing Balance' : 'Flat Rate') as InterestMethod,
+        installmentPeriod: (Number(r[12]) || 12) as InstallmentPeriod,
+        downPaymentPercentage: Number(r[13]) || 0,
+        downPaymentAmount: Number(r[14]) || 0,
+        financedPrincipal: Number(r[15]) || 0,
+        totalInterest: Number(r[16]) || 0,
+        totalRepayment: Number(r[17]) || 0,
+        monthlyInstallment: Number(r[18]) || 0,
+        transactionStatus,
+        createdBy: r[20] || '',
+        approvedBy: r[21] || '',
+        lastUpdated: r[22] || '',
+        isDeleted,
+        deletedAt: r[24] || undefined,
+        deletedBy: r[25] || undefined,
+        deletionReason: r[26] || undefined,
+        previousStatus,
+      };
+    });
 
   const schedulesByContract: Record<string, AmortizationRow[]> = {};
   for (const r of amortRows) {
@@ -447,7 +537,10 @@ export async function readAllDatabaseData(
     if (key === 'Company Address') config.companyAddress = val;
     if (key === 'Authorized Users' && val) {
       try {
-        config.authorizedUsers = JSON.parse(val) as UserPermissionEntry[];
+        const parsed = JSON.parse(val) as Partial<UserPermissionEntry>[];
+        config.authorizedUsers = Array.isArray(parsed)
+          ? parsed.map((u) => normalizeUserEntry(u))
+          : [];
       } catch {
         // ignore
       }
@@ -495,6 +588,11 @@ function transactionToRow(tx: RhpTransaction): Array<string | number> {
     tx.createdBy,
     tx.approvedBy,
     tx.lastUpdated,
+    tx.isDeleted ? 'TRUE' : 'FALSE',
+    tx.deletedAt || '',
+    tx.deletedBy || '',
+    tx.deletionReason || '',
+    tx.previousStatus || '',
   ];
 }
 
@@ -521,7 +619,7 @@ export async function appendTransactionToSheet(
   await sheetsFetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
       spreadsheetId
-    )}/values/${SHEET_NAMES.TRANSACTIONS}!A:W:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+    )}/values/${SHEET_NAMES.TRANSACTIONS}!A:AB:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
     accessToken,
     {
       method: 'POST',
@@ -583,7 +681,7 @@ export async function updateTransactionInSheet(
   await sheetsFetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
       spreadsheetId
-    )}/values/${SHEET_NAMES.TRANSACTIONS}!A${sheetRowNumber}:W${sheetRowNumber}?valueInputOption=USER_ENTERED`,
+    )}/values/${SHEET_NAMES.TRANSACTIONS}!A${sheetRowNumber}:AB${sheetRowNumber}?valueInputOption=USER_ENTERED`,
     accessToken,
     {
       method: 'PUT',
@@ -633,6 +731,48 @@ export async function updateTransactionInSheet(
       }
     );
   }
+
+  if (auditEntries.length > 0) {
+    await appendAuditLogsToSheet(accessToken, spreadsheetId, auditEntries);
+  }
+}
+
+/**
+ * Updates only the transaction row in Transaction_Records and appends Audit_Log entries.
+ * Preserves Amortization_Schedule rows completely untouched (used for Soft Delete & Restore).
+ */
+export async function updateTransactionStatusOnlyInSheet(
+  accessToken: string,
+  spreadsheetId: string,
+  updatedTx: RhpTransaction,
+  auditEntries: AuditLogEntry[]
+): Promise<void> {
+  const existing = await sheetsFetch<{ values?: string[][] }>(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      spreadsheetId
+    )}/values/${SHEET_NAMES.TRANSACTIONS}!C2:C`,
+    accessToken
+  );
+
+  const rows = existing.values || [];
+  const rowIndex = rows.findIndex((r) => r[0] === updatedTx.rhpContractId);
+  if (rowIndex === -1) {
+    throw new Error(`ไม่พบเลขที่สัญญา ${updatedTx.rhpContractId} ใน Google Sheets`);
+  }
+
+  const sheetRowNumber = rowIndex + 2;
+  await sheetsFetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(
+      spreadsheetId
+    )}/values/${SHEET_NAMES.TRANSACTIONS}!A${sheetRowNumber}:AB${sheetRowNumber}?valueInputOption=USER_ENTERED`,
+    accessToken,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        values: [transactionToRow(updatedTx)],
+      }),
+    }
+  );
 
   if (auditEntries.length > 0) {
     await appendAuditLogsToSheet(accessToken, spreadsheetId, auditEntries);

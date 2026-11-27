@@ -130,8 +130,11 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
           <div className="flex items-center gap-3">
             <FileText className="h-5 w-5 text-[#0F2942]" />
             <div>
+              <p className="text-[11px] font-semibold tracking-wider text-[#0F2942]">
+                MAX SANY RHP PORTAL · BY RISK CONTROL DEPARTMENT
+              </p>
               <h3 className="text-base font-semibold text-slate-900">
-                เอกสารสรุปการคำนวณ RHP (PDF A4 แนวตั้ง)
+                ระบบคำนวณและบริหารจัดการสัญญาปรับโครงสร้างหนี้ (Restructuring Hire Purchase Calculation Summary)
               </h3>
               <p className="text-xs text-slate-500">
                 <span className="font-mono font-medium text-slate-700">{targetFilename}</span>
@@ -145,7 +148,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                       : 'font-semibold text-amber-700'
                   }
                 >
-                  สถานะ: {transaction.transactionStatus === 'Approved' ? 'Approved (อนุมัติแล้ว)' : 'Draft (ร่างเอกสาร)'}
+                  สถานะ (Status): {transaction.transactionStatus === 'Approved' ? 'Approved (อนุมัติแล้ว)' : 'Draft (ร่างเอกสาร)'}
                 </span>
               </p>
             </div>
@@ -193,9 +196,11 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
           {/* Signature editor sidebar */}
           <div className="overflow-y-auto border-b border-slate-200 bg-slate-50 p-5 lg:col-span-4 lg:border-b-0 lg:border-r">
-            <h4 className="text-sm font-semibold text-slate-900">ข้อมูลผู้ลงนามในเอกสาร</h4>
+            <h4 className="text-sm font-semibold text-slate-900">
+              ส่วนการลงนาม (Approval and Authorization)
+            </h4>
             <p className="mt-1 text-xs text-slate-500">
-              ระบุชื่อ ตำแหน่ง และวันที่ลงนาม (สามารถเว้นว่างเพื่อพิมพ์ไปเซ็นสดได้) แล้วกดอัปเดต PDF
+              ระบุชื่อ-นามสกุล (Full Name), ตำแหน่ง (Position) และวันที่ (Date) แล้วกดอัปเดต PDF
             </p>
 
             <div className="mt-4 space-y-5">
@@ -203,7 +208,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <p className="text-xs font-semibold text-slate-800">1. ผู้จัดทำรายการ (Prepared By)</p>
                 <input
                   type="text"
-                  placeholder="ชื่อ-นามสกุล"
+                  placeholder="ชื่อ-นามสกุล (Full Name)"
                   value={signatures.preparedByName}
                   onChange={(e) =>
                     setSignatures((s) => ({ ...s, preparedByName: e.target.value }))
@@ -213,7 +218,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
-                    placeholder="ตำแหน่ง"
+                    placeholder="ตำแหน่ง (Position)"
                     value={signatures.preparedByPosition}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, preparedByPosition: e.target.value }))
@@ -222,7 +227,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                   />
                   <input
                     type="text"
-                    placeholder="YYYY-MM-DD"
+                    placeholder="วันที่ (Date: YYYY-MM-DD)"
                     value={signatures.preparedDate}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, preparedDate: e.target.value }))
@@ -236,7 +241,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <p className="text-xs font-semibold text-slate-800">2. ผู้ตรวจสอบ (Reviewed By)</p>
                 <input
                   type="text"
-                  placeholder="ชื่อ-นามสกุล"
+                  placeholder="ชื่อ-นามสกุล (Full Name)"
                   value={signatures.reviewedByName}
                   onChange={(e) =>
                     setSignatures((s) => ({ ...s, reviewedByName: e.target.value }))
@@ -246,7 +251,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
-                    placeholder="ตำแหน่ง"
+                    placeholder="ตำแหน่ง (Position)"
                     value={signatures.reviewedByPosition}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, reviewedByPosition: e.target.value }))
@@ -255,7 +260,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                   />
                   <input
                     type="text"
-                    placeholder="YYYY-MM-DD"
+                    placeholder="วันที่ (Date: YYYY-MM-DD)"
                     value={signatures.reviewedDate}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, reviewedDate: e.target.value }))
@@ -269,7 +274,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <p className="text-xs font-semibold text-slate-800">3. ผู้อนุมัติ (Approved By)</p>
                 <input
                   type="text"
-                  placeholder="ชื่อ-นามสกุล"
+                  placeholder="ชื่อ-นามสกุล (Full Name)"
                   value={signatures.approvedByName}
                   onChange={(e) =>
                     setSignatures((s) => ({ ...s, approvedByName: e.target.value }))
@@ -279,7 +284,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
-                    placeholder="ตำแหน่ง"
+                    placeholder="ตำแหน่ง (Position)"
                     value={signatures.approvedByPosition}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, approvedByPosition: e.target.value }))
@@ -288,7 +293,7 @@ export function PdfPreviewModal({ open, transaction, schedule, onClose }: PdfPre
                   />
                   <input
                     type="text"
-                    placeholder="YYYY-MM-DD"
+                    placeholder="วันที่ (Date: YYYY-MM-DD)"
                     value={signatures.approvedDate}
                     onChange={(e) =>
                       setSignatures((s) => ({ ...s, approvedDate: e.target.value }))

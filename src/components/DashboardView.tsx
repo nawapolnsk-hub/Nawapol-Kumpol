@@ -1,22 +1,34 @@
 import { useMemo, useState } from 'react';
-import { BarChart3, Database } from 'lucide-react';
+import { BarChart3, Database, RefreshCw } from 'lucide-react';
 import type { ConnectionStatus, RhpTransaction } from '../types/rhp.ts';
 import { formatTHB, getBangkokParts } from '../utils/rhpCalculator.ts';
 
 interface DashboardViewProps {
-  isAuthenticated: boolean;
+  isPortalAuthenticated: boolean;
+  hasSheetsAccess: boolean;
+  reconnectLoading?: boolean;
+  canApprove?: boolean;
+  canCreateContract?: boolean;
   connection: ConnectionStatus;
   transactions: RhpTransaction[];
   onRequireSetup: () => void;
+  onReconnectSheets: () => Promise<void>;
   onNavigateCalculator: () => void;
+  onNavigateApproval?: () => void;
 }
 
 export function DashboardView({
-  isAuthenticated,
+  isPortalAuthenticated,
+  hasSheetsAccess,
+  reconnectLoading = false,
+  canApprove = false,
+  canCreateContract = true,
   connection,
   transactions,
   onRequireSetup,
+  onReconnectSheets,
   onNavigateCalculator,
+  onNavigateApproval,
 }: DashboardViewProps) {
   const bangkokNow = getBangkokParts();
   const currentYYYYMM = `${bangkokNow.year}-${bangkokNow.month}`;
@@ -24,23 +36,28 @@ export function DashboardView({
   const [selectedYear, setSelectedYear] = useState<string>('ALL');
   const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
 
+  const activeTransactions = useMemo(
+    () => transactions.filter((tx) => !tx.isDeleted && tx.transactionStatus !== 'Deleted'),
+    [transactions]
+  );
+
   const availableYears = useMemo(() => {
     const years = new Set<string>([bangkokNow.year]);
-    for (const tx of transactions) {
+    for (const tx of activeTransactions) {
       if (tx.transactionDate.length >= 4) {
         years.add(tx.transactionDate.slice(0, 4));
       }
     }
     return Array.from(years).sort().reverse();
-  }, [transactions, bangkokNow.year]);
+  }, [activeTransactions, bangkokNow.year]);
 
   const filtered = useMemo(() => {
-    return transactions.filter((tx) => {
+    return activeTransactions.filter((tx) => {
       if (selectedYear !== 'ALL' && !tx.transactionDate.startsWith(selectedYear)) return false;
       if (selectedMonth !== 'ALL' && tx.transactionDate.slice(5, 7) !== selectedMonth) return false;
       return true;
     });
-  }, [transactions, selectedYear, selectedMonth]);
+  }, [activeTransactions, selectedYear, selectedMonth]);
 
   const metrics = useMemo(() => {
     let totalAr = 0;
@@ -52,7 +69,7 @@ export function DashboardView({
     let flatRateCount = 0;
     let reducingCount = 0;
 
-    for (const tx of transactions) {
+    for (const tx of activeTransactions) {
       if (tx.transactionDate.startsWith(currentYYYYMM)) {
         currentMonthCount++;
       }
@@ -70,7 +87,7 @@ export function DashboardView({
     }
 
     return {
-      totalAllCount: transactions.length,
+      totalAllCount: activeTransactions.length,
       filteredCount: filtered.length,
       currentMonthCount,
       totalAr,
@@ -81,7 +98,7 @@ export function DashboardView({
       flatRateCount,
       reducingCount,
     };
-  }, [transactions, filtered, currentYYYYMM]);
+  }, [activeTransactions, filtered, currentYYYYMM]);
 
   // Monthly breakdown for chart
   const monthlySeries = useMemo(() => {
@@ -101,34 +118,57 @@ export function DashboardView({
 
   const maxMonthlyAr = Math.max(1, ...monthlySeries.map((m) => m.ar));
 
-  if (!isAuthenticated || !connection.connected) {
+  if (!isPortalAuthenticated || !connection.connected || !hasSheetsAccess) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white p-10 text-center">
         <Database className="mx-auto h-10 w-10 text-slate-400" />
         <h3 className="mt-3 text-base font-semibold text-slate-900">
-          เชื่อมต่อ Google Sheets เพื่อแสดงผล Dashboard จริง
+          {!isPortalAuthenticated
+            ? 'กรุณาเข้าสู่ระบบ MAX SANY RHP PORTAL เพื่อดู Dashboard'
+            : !hasSheetsAccess
+              ? 'สิทธิ์เชื่อมต่อ Google Sheets หมดอายุชั่วคราว'
+              : 'เชื่อมต่อ Google Sheets เพื่อแสดงผล Dashboard จริง'}
         </h3>
         <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-slate-600">
-          ระบบ Dashboard แสดงข้อมูลจากฐานข้อมูลจริง RHP_Restructuring_Database เท่านั้น ไม่ใช้ข้อมูลจำลอง
+          {!isPortalAuthenticated
+            ? 'เข้าสู่ระบบด้วยบัญชี Google ขององค์กรเพื่อโหลดข้อมูลพอร์ต RHP จากฐานข้อมูลจริง'
+            : !hasSheetsAccess
+              ? 'คุณยังคงเข้าสู่ระบบ MAX SANY RHP PORTAL อยู่ กรุณากด Reconnect Google เพื่อต่ออายุสิทธิ์อ่านข้อมูลจาก RHP_Restructuring_Database'
+              : 'ระบบ Dashboard แสดงข้อมูลจากฐานข้อมูลจริง RHP_Restructuring_Database เท่านั้น ไม่ใช้ข้อมูลจำลอง'}
         </p>
-        <button
-          type="button"
-          onClick={onRequireSetup}
-          className="mt-5 whitespace-nowrap rounded-lg bg-[#0F2942] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
-        >
-          เชื่อมต่อ Google Sheets
-        </button>
+        {isPortalAuthenticated && !hasSheetsAccess ? (
+          <button
+            type="button"
+            onClick={() => void onReconnectSheets()}
+            disabled={reconnectLoading}
+            className="mt-5 inline-flex items-center gap-2 whitespace-nowrap rounded-lg bg-amber-700 px-5 py-2.5 text-xs font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${reconnectLoading ? 'animate-spin' : ''}`} />
+            {reconnectLoading ? 'กำลังเชื่อมต่อใหม่...' : 'Reconnect Google'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onRequireSetup}
+            className="mt-5 whitespace-nowrap rounded-lg bg-[#0F2942] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
+          >
+            เชื่อมต่อ Google Sheets
+          </button>
+        )}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Period Filters */}
+      {/* Period Filters & Official Portal Overview Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-5 py-4">
         <div>
-          <h2 className="text-base font-semibold text-slate-900">
-            ภาพรวมพอร์ตการปรับโครงสร้างสัญญาเช่าซื้อ (RHP Portfolio)
+          <p className="text-[11px] font-semibold tracking-wider text-[#0F2942]">
+            MAX SANY RHP PORTAL · BY RISK CONTROL DEPARTMENT
+          </p>
+          <h2 className="mt-0.5 text-base font-semibold text-slate-900">
+            ภาพรวมพอร์ตการปรับโครงสร้างสัญญาเช่าซื้อ (RHP Portfolio Overview)
           </h2>
           <p className="text-xs text-slate-500">
             ข้อมูลจากฐานข้อมูลกลาง {connection.spreadsheetTitle || 'RHP_Restructuring_Database'}
@@ -163,6 +203,26 @@ export function DashboardView({
               </option>
             ))}
           </select>
+
+          {canApprove && metrics.draftCount > 0 && onNavigateApproval && (
+            <button
+              type="button"
+              onClick={onNavigateApproval}
+              className="whitespace-nowrap rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+            >
+              รออนุมัติ {metrics.draftCount} รายการ
+            </button>
+          )}
+
+          {canCreateContract && (
+            <button
+              type="button"
+              onClick={onNavigateCalculator}
+              className="whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
+            >
+              + สร้างสัญญา RHP ใหม่
+            </button>
+          )}
         </div>
       </div>
 
@@ -237,13 +297,15 @@ export function DashboardView({
           <p className="mt-2 text-sm font-semibold text-slate-900">
             ยังไม่มีข้อมูลรายการปรับโครงสร้างในช่วงเวลาที่เลือก
           </p>
-          <button
-            type="button"
-            onClick={onNavigateCalculator}
-            className="mt-4 whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
-          >
-            สร้างรายการปรับโครงสร้างแรก
-          </button>
+          {canCreateContract && (
+            <button
+              type="button"
+              onClick={onNavigateCalculator}
+              className="mt-4 whitespace-nowrap rounded-lg bg-[#0F2942] px-4 py-2 text-xs font-semibold text-white hover:bg-[#1E3A5F]"
+            >
+              สร้างรายการปรับโครงสร้างแรก
+            </button>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">

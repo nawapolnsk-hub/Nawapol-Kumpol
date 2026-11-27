@@ -101,6 +101,21 @@ function drawMixedText(
   }
 }
 
+function fitText(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  maxWidth: number,
+  fontSize: number,
+  bold: boolean
+): string {
+  if (measureMixedWidth(doc, text, fontSize, bold) <= maxWidth) return text;
+  let trimmed = text;
+  while (trimmed.length > 1 && measureMixedWidth(doc, `${trimmed}...`, fontSize, bold) > maxWidth) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  return `${trimmed}...`;
+}
+
 function decodeLogoBuffer(dataUrl?: string | null): Buffer | null {
   if (!dataUrl || typeof dataUrl !== 'string') return null;
   const match = /^data:image\/(png|jpeg|jpg);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
@@ -118,12 +133,13 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
       const doc = new PDFDocument({
         size: 'A4',
         layout: 'portrait',
-        margins: { top: 40, bottom: 40, left: 40, right: 40 },
+        margins: { top: 36, bottom: 36, left: 40, right: 40 },
         bufferPages: true,
         info: {
-          Title: `RHP Calculation Form - ${payload.transaction.rhpContractId}`,
+          Title: `MAX SANY RHP PORTAL - ${payload.transaction.rhpContractId}`,
           Author: payload.companyName || 'Risk Control Department',
-          Subject: 'แบบสรุปการคำนวณปรับโครงสร้างสัญญาเช่าซื้อ',
+          Subject:
+            'ระบบคำนวณและบริหารจัดการสัญญาปรับโครงสร้างหนี้ (Restructuring Hire Purchase Calculation & Contract Management System)',
         },
       });
 
@@ -152,10 +168,10 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
         doc.save();
         doc.rotate(-35, { origin: [pageWidth / 2, pageHeight / 2] });
         doc.opacity(0.08);
-        doc.font('LatinBold').fontSize(64).fillColor('#b45309');
-        doc.text('DRAFT', pageWidth / 2 - 120, pageHeight / 2 - 45, { lineBreak: false });
-        doc.font('ThaiBold').fontSize(22).fillColor('#b45309');
-        doc.text('ร่างเอกสาร - ยังไม่ได้รับอนุมัติ', pageWidth / 2 - 150, pageHeight / 2 + 25, {
+        doc.font('LatinBold').fontSize(62).fillColor('#b45309');
+        doc.text('DRAFT', pageWidth / 2 - 115, pageHeight / 2 - 50, { lineBreak: false });
+        doc.font('ThaiBold').fontSize(20).fillColor('#b45309');
+        doc.text('ร่างเอกสาร - ยังไม่ได้รับอนุมัติ (Not Approved)', pageWidth / 2 - 185, pageHeight / 2 + 20, {
           lineBreak: false,
         });
         doc.restore();
@@ -167,88 +183,125 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
           let headerTextX = marginL;
           if (logoBuffer) {
             try {
-              doc.image(logoBuffer, marginL, 38, { fit: [44, 44] });
-              headerTextX = marginL + 54;
+              doc.image(logoBuffer, marginL, 30, { fit: [48, 48] });
+              headerTextX = marginL + 56;
             } catch {
               headerTextX = marginL;
             }
           }
 
-          drawMixedText(doc, payload.companyName || 'บริษัท ลีสซิ่ง เครื่องจักร จำกัด', headerTextX, 38, {
-            fontSize: 13,
+          const boxW = 205;
+          const leftHeaderMaxW = pageWidth - marginR - boxW - headerTextX - 10;
+
+          drawMixedText(doc, 'MAX SANY RHP PORTAL', headerTextX, 27, {
+            fontSize: 12.5,
             bold: true,
             color: '#0f2942',
           });
 
-          if (payload.companyAddress) {
-            drawMixedText(doc, payload.companyAddress, headerTextX, 55, {
-              fontSize: 8.5,
-              color: '#475569',
-            });
-          }
+          drawMixedText(
+            doc,
+            fitText(
+              doc,
+              'ระบบคำนวณและบริหารจัดการสัญญาปรับโครงสร้างหนี้',
+              leftHeaderMaxW,
+              9.5,
+              true
+            ),
+            headerTextX,
+            43,
+            { fontSize: 9.5, bold: true, color: '#1e3a5f' }
+          );
 
-          drawMixedText(doc, 'แบบสรุปการคำนวณปรับโครงสร้างสัญญาเช่าซื้อ', headerTextX, 68, {
-            fontSize: 11,
+          drawMixedText(
+            doc,
+            fitText(
+              doc,
+              'Restructuring Hire Purchase Calculation & Contract Management System',
+              leftHeaderMaxW,
+              7.2,
+              false
+            ),
+            headerTextX,
+            56,
+            { fontSize: 7.2, color: '#334155' }
+          );
+
+          drawMixedText(doc, 'By Risk Control Department', headerTextX, 67, {
+            fontSize: 7.8,
             bold: true,
-            color: '#1e3a5f',
+            color: '#0f2942',
           });
 
+          if (payload.companyName) {
+            drawMixedText(
+              doc,
+              fitText(doc, payload.companyName, leftHeaderMaxW, 7, false),
+              headerTextX,
+              78,
+              { fontSize: 7, color: '#475569' }
+            );
+          }
+
           // Right metadata box
-          const boxW = 195;
           const boxX = pageWidth - marginR - boxW;
           doc
-            .roundedRect(boxX, 36, boxW, 52, 4)
+            .roundedRect(boxX, 28, boxW, 60, 4)
             .fillAndStroke(isDraft ? '#fffbeb' : '#ecfdf5', isDraft ? '#f59e0b' : '#10b981');
 
-          drawMixedText(doc, `เลขที่สัญญา: ${tx.rhpContractId}`, boxX + 8, 41, {
-            fontSize: 9.5,
+          drawMixedText(doc, 'เลขที่สัญญา (RHP Contract ID):', boxX + 8, 33, {
+            fontSize: 7.2,
+            color: '#475569',
+          });
+          drawMixedText(doc, tx.rhpContractId, boxX + 8, 43, {
+            fontSize: 9.8,
             bold: true,
             color: '#0f172a',
           });
-          drawMixedText(doc, `วันที่จัดทำ: ${tx.transactionDate}`, boxX + 8, 55, {
-            fontSize: 8.5,
+          drawMixedText(doc, `วันที่จัดทำ (Date): ${tx.transactionDate}`, boxX + 8, 57, {
+            fontSize: 7.8,
             color: '#334155',
           });
           drawMixedText(
             doc,
-            isDraft ? 'สถานะ: DRAFT (ยังไม่ได้รับอนุมัติ)' : 'สถานะ: APPROVED (อนุมัติแล้ว)',
+            isDraft
+              ? 'สถานะ (Status): DRAFT (ยังไม่ได้รับอนุมัติ)'
+              : 'สถานะ (Status): APPROVED (อนุมัติแล้ว)',
             boxX + 8,
-            69,
+            70,
             {
-              fontSize: 8.5,
+              fontSize: 7.8,
               bold: true,
               color: isDraft ? '#b45309' : '#047857',
             }
           );
 
           doc
-            .moveTo(marginL, 96)
-            .lineTo(pageWidth - marginR, 96)
+            .moveTo(marginL, 95)
+            .lineTo(pageWidth - marginR, 95)
             .lineWidth(1.2)
             .strokeColor('#0f2942')
             .stroke();
         } else {
-          // Continuation page header with RHP Contract ID
-          doc
-            .rect(marginL, 34, contentWidth, 26)
-            .fillAndStroke('#f8fafc', '#cbd5e1');
+          // Continuation page header with MAX SANY RHP PORTAL & RHP Contract ID on every page
+          doc.rect(marginL, 32, contentWidth, 28).fillAndStroke('#f8fafc', '#cbd5e1');
           drawMixedText(
             doc,
-            `${payload.companyName || 'RHP Management System'}  |  เลขที่สัญญา: ${tx.rhpContractId}`,
+            `MAX SANY RHP PORTAL · By Risk Control Department  |  RHP Contract ID: ${tx.rhpContractId}`,
             marginL + 8,
-            42,
-            { fontSize: 9, bold: true, color: '#0f2942' }
+            40,
+            { fontSize: 8.2, bold: true, color: '#0f2942' }
           );
           drawMixedText(
             doc,
-            isDraft ? 'สถานะ: DRAFT' : 'สถานะ: APPROVED',
+            isDraft ? 'สถานะ (Status): DRAFT' : 'สถานะ (Status): APPROVED',
             pageWidth - marginR - 140,
-            42,
+            40,
             {
-              fontSize: 8.5,
+              fontSize: 8,
               bold: true,
               color: isDraft ? '#b45309' : '#047857',
-              width: 130,
+              width: 132,
               align: 'right',
             }
           );
@@ -259,198 +312,224 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
       drawWatermarkIfDraft();
       drawTopContractBanner(true);
 
-      let y = 106;
+      let y = 104;
 
-      // Section 1: Customer Information
+      // Section 1: Customer & Contract Information (Bilingual)
       doc.rect(marginL, y, contentWidth, 20).fill('#0f2942');
-      drawMixedText(doc, 'ส่วนที่ 1: ข้อมูลพื้นฐานลูกค้าและสัญญาเดิม (Customer Information)', marginL + 8, y + 5, {
-        fontSize: 9.5,
-        bold: true,
-        color: '#ffffff',
-      });
+      drawMixedText(
+        doc,
+        'ส่วนที่ 1: ข้อมูลลูกค้าและรายละเอียดสัญญา (Customer & Contract Information)',
+        marginL + 8,
+        y + 5,
+        { fontSize: 9, bold: true, color: '#ffffff' }
+      );
       y += 22;
 
       const infoRows: Array<[string, string, string, string]> = [
-        ['รหัสลูกค้า (Customer ID)', tx.customerId, 'เลขที่สัญญา RHP ใหม่', tx.rhpContractId],
-        ['ชื่อผู้เช่าซื้อ (Customer Name)', tx.customerName, 'เลขที่สัญญาเดิม', tx.originalContractNumber],
-        ['Serial Number เครื่องจักร', tx.machineSerialNumber, 'วันที่ทำรายการ', tx.transactionDate],
+        [
+          'รหัสลูกค้า (Customer ID)',
+          tx.customerId,
+          'เลขที่สัญญาปรับโครงสร้างใหม่ (New RHP Contract Number)',
+          tx.rhpContractId,
+        ],
+        [
+          'ชื่อผู้เช่าซื้อ (Hire Purchase Customer Name)',
+          tx.customerName,
+          'เลขที่สัญญาเดิม (Original Contract Number)',
+          tx.originalContractNumber,
+        ],
+        [
+          'หมายเลขประจำเครื่องจักร (Machine Serial Number)',
+          tx.machineSerialNumber,
+          'วันที่ทำรายการ (Transaction Date)',
+          tx.transactionDate,
+        ],
       ];
 
+      const halfW = contentWidth / 2;
+      const infoRowH = 30;
       for (const [l1, v1, l2, v2] of infoRows) {
-        doc.rect(marginL, y, contentWidth, 22).fillAndStroke('#ffffff', '#e2e8f0');
+        doc.rect(marginL, y, contentWidth, infoRowH).fillAndStroke('#ffffff', '#e2e8f0');
         doc
-          .moveTo(marginL + contentWidth / 2, y)
-          .lineTo(marginL + contentWidth / 2, y + 22)
+          .moveTo(marginL + halfW, y)
+          .lineTo(marginL + halfW, y + infoRowH)
           .strokeColor('#e2e8f0')
           .stroke();
 
-        drawMixedText(doc, `${l1}:`, marginL + 6, y + 6, { fontSize: 8.5, bold: true, color: '#475569' });
-        drawMixedText(doc, v1, marginL + 118, y + 6, { fontSize: 9, bold: true, color: '#0f172a' });
-
-        drawMixedText(doc, `${l2}:`, marginL + contentWidth / 2 + 6, y + 6, {
-          fontSize: 8.5,
-          bold: true,
-          color: '#475569',
-        });
-        drawMixedText(doc, v2, marginL + contentWidth / 2 + 106, y + 6, {
+        drawMixedText(doc, l1, marginL + 8, y + 4, { fontSize: 7.5, color: '#475569' });
+        drawMixedText(doc, fitText(doc, v1, halfW - 16, 9, true), marginL + 8, y + 15, {
           fontSize: 9,
           bold: true,
           color: '#0f172a',
         });
-        y += 22;
+
+        drawMixedText(doc, l2, marginL + halfW + 8, y + 4, { fontSize: 7.5, color: '#475569' });
+        drawMixedText(doc, fitText(doc, v2, halfW - 16, 9, true), marginL + halfW + 8, y + 15, {
+          fontSize: 9,
+          bold: true,
+          color: '#0f172a',
+        });
+        y += infoRowH;
       }
 
       y += 10;
 
-      // Section 2: Financial Details (AR & Monthly Installment emphasized)
+      // Section 2: Financial Information (Bilingual)
       doc.rect(marginL, y, contentWidth, 20).fill('#0f2942');
-      drawMixedText(doc, 'ส่วนที่ 2: รายละเอียดทางการเงิน (Financial Summary)', marginL + 8, y + 5, {
-        fontSize: 9.5,
+      drawMixedText(doc, 'ส่วนที่ 2: รายละเอียดทางการเงิน (Financial Information)', marginL + 8, y + 5, {
+        fontSize: 9,
         bold: true,
         color: '#ffffff',
       });
       y += 24;
 
-      // Highlight Boxes for AR and Monthly Installment
+      // Highlight Boxes for AR & Monthly Installment
       const cardGap = 12;
       const cardW = (contentWidth - cardGap) / 2;
 
-      doc.roundedRect(marginL, y, cardW, 48, 4).fillAndStroke('#eff6ff', '#1e3a5f');
-      drawMixedText(doc, 'ยอด AR รวม (Accounts Receivable)', marginL + 10, y + 7, {
-        fontSize: 8.5,
+      doc.roundedRect(marginL, y, cardW, 50, 4).fillAndStroke('#eff6ff', '#1e3a5f');
+      drawMixedText(doc, 'ยอดลูกหนี้รวม (Total Amount Receivable: AR)', marginL + 10, y + 7, {
+        fontSize: 8,
         bold: true,
         color: '#1e3a5f',
       });
-      drawMixedText(doc, `${formatTHB(tx.ar)} THB`, marginL + 10, y + 21, {
+      drawMixedText(doc, `${formatTHB(tx.ar)} THB`, marginL + 10, y + 22, {
         fontSize: 15,
         bold: true,
         color: '#0f2942',
       });
 
       const rightCardX = marginL + cardW + cardGap;
-      doc.roundedRect(rightCardX, y, cardW, 48, 4).fillAndStroke('#ecfdf5', '#059669');
+      doc.roundedRect(rightCardX, y, cardW, 50, 4).fillAndStroke('#ecfdf5', '#059669');
       drawMixedText(doc, 'ค่างวดต่อเดือน (Monthly Installment)', rightCardX + 10, y + 7, {
-        fontSize: 8.5,
+        fontSize: 8,
         bold: true,
         color: '#047857',
       });
-      drawMixedText(doc, `${formatTHB(tx.monthlyInstallment)} THB`, rightCardX + 10, y + 21, {
+      drawMixedText(doc, `${formatTHB(tx.monthlyInstallment)} THB`, rightCardX + 10, y + 22, {
         fontSize: 15,
         bold: true,
         color: '#065f46',
       });
 
-      y += 56;
+      y += 58;
 
       const finPairs: Array<[string, string, string, string]> = [
         [
-          'ราคาต้นทุนเครื่องจักร',
+          'ราคาต้นทุนเครื่องจักร (Machine Cost)',
           `${formatTHB(tx.machineCost)} THB`,
-          'วิธีคำนวณดอกเบี้ย',
+          'วิธีคำนวณดอกเบี้ย (Interest Calculation Method)',
           tx.interestMethod,
         ],
         [
-          'ค่าดำเนินการเพิ่มเติม',
+          'ค่าดำเนินการเพิ่มเติม (Additional Processing Fee)',
           `${formatTHB(tx.processingFee)} THB`,
-          'อัตราดอกเบี้ยต่อปี',
+          'อัตราดอกเบี้ยต่อปี (Annual Interest Rate)',
           formatPercent(tx.interestRate, 2),
         ],
         [
-          'เงินดาวน์ (%)',
+          'เงินดาวน์ (Down Payment %)',
           formatPercent(tx.downPaymentPercentage, 2),
-          'ระยะเวลาผ่อนชำระ',
-          `${tx.installmentPeriod} เดือน`,
+          'ระยะเวลาการผ่อนชำระ (Installment Period)',
+          `${tx.installmentPeriod} เดือน (Months)`,
         ],
         [
-          'จำนวนเงินดาวน์',
+          'จำนวนเงินดาวน์ (Down Payment Amount)',
           `${formatTHB(tx.downPaymentAmount)} THB`,
-          'ดอกเบี้ยรวมตลอดสัญญา',
+          'ดอกเบี้ยรวม (Total Interest)',
           `${formatTHB(tx.totalInterest)} THB`,
         ],
         [
-          'ยอดเงินต้นที่จัดไฟแนนซ์',
+          'ยอดเงินต้นที่จัดไฟแนนซ์ (Financed Principal)',
           `${formatTHB(tx.financedPrincipal)} THB`,
-          'ยอดชำระรวมทั้งหมด',
+          'ยอดชำระรวม (Total Repayment)',
           `${formatTHB(tx.totalRepayment)} THB`,
         ],
       ];
 
+      const finRowH = 28;
       for (const [l1, v1, l2, v2] of finPairs) {
-        doc.rect(marginL, y, contentWidth, 20).fillAndStroke('#ffffff', '#e2e8f0');
+        doc.rect(marginL, y, contentWidth, finRowH).fillAndStroke('#ffffff', '#e2e8f0');
         doc
-          .moveTo(marginL + contentWidth / 2, y)
-          .lineTo(marginL + contentWidth / 2, y + 20)
+          .moveTo(marginL + halfW, y)
+          .lineTo(marginL + halfW, y + finRowH)
           .strokeColor('#e2e8f0')
           .stroke();
 
-        drawMixedText(doc, l1, marginL + 6, y + 5, { fontSize: 8.5, color: '#475569' });
-        drawMixedText(doc, v1, marginL + 115, y + 5, {
+        drawMixedText(doc, l1, marginL + 8, y + 4, { fontSize: 7.5, color: '#475569' });
+        drawMixedText(doc, v1, marginL + 8, y + 14.5, {
           fontSize: 9,
           bold: true,
           color: '#0f172a',
-          width: contentWidth / 2 - 122,
+          width: halfW - 16,
           align: 'right',
         });
 
-        drawMixedText(doc, l2, marginL + contentWidth / 2 + 6, y + 5, {
-          fontSize: 8.5,
-          color: '#475569',
-        });
-        drawMixedText(doc, v2, marginL + contentWidth / 2 + 115, y + 5, {
+        drawMixedText(doc, l2, marginL + halfW + 8, y + 4, { fontSize: 7.5, color: '#475569' });
+        drawMixedText(doc, v2, marginL + halfW + 8, y + 14.5, {
           fontSize: 9,
           bold: true,
           color: '#0f172a',
-          width: contentWidth / 2 - 122,
+          width: halfW - 16,
           align: 'right',
         });
-        y += 20;
+        y += finRowH;
       }
 
       y += 12;
 
-      // Section 3: Amortization Schedule Table
-      const colWidths = [42, 95, 90, 90, 98, 100.28]; // Sum = 515.28
-      const headers = [
-        'งวดที่',
-        'เงินต้นก่อนชำระ',
-        'เงินต้นที่ชำระ',
-        'ดอกเบี้ยประจำงวด',
-        'ยอดชำระต่องวด',
-        'เงินต้นคงเหลือ',
+      // Section 3: Bilingual Amortization Schedule Table
+      const colWidths = [58, 95, 85, 85, 96, 96.28]; // Sum = 515.28
+      const headers: Array<{ th: string; en: string }> = [
+        { th: 'งวดที่', en: '(Installment No.)' },
+        { th: 'เงินต้นคงเหลือก่อนชำระ', en: '(Opening Principal Balance)' },
+        { th: 'เงินต้นที่ชำระ', en: '(Principal Payment)' },
+        { th: 'ดอกเบี้ยประจำงวด', en: '(Interest Payment)' },
+        { th: 'ยอดชำระประจำงวด', en: '(Monthly Installment)' },
+        { th: 'เงินต้นคงเหลือหลังชำระ', en: '(Closing Principal Balance)' },
       ];
 
       const drawScheduleSectionBanner = (topY: number) => {
         doc.rect(marginL, topY, contentWidth, 20).fill('#0f2942');
         drawMixedText(
           doc,
-          `ส่วนที่ 3: ตารางแสดงรายละเอียดการผ่อนชำระ (${payload.schedule.length} งวด)`,
+          `ส่วนที่ 3: ตารางการผ่อนชำระ (Amortization Schedule — ${payload.schedule.length} งวด / Installments)`,
           marginL + 8,
           topY + 5,
-          { fontSize: 9.5, bold: true, color: '#ffffff' }
+          { fontSize: 9, bold: true, color: '#ffffff' }
         );
         return topY + 22;
       };
 
       const drawTableHeader = (topY: number) => {
-        doc.rect(marginL, topY, contentWidth, 20).fillAndStroke('#e2e8f0', '#cbd5e1');
+        const hdrH = 26;
+        doc.rect(marginL, topY, contentWidth, hdrH).fillAndStroke('#e2e8f0', '#cbd5e1');
         let colX = marginL;
         for (let i = 0; i < headers.length; i++) {
-          drawMixedText(doc, headers[i], colX + 4, topY + 5, {
-            fontSize: 8,
+          const align = i === 0 ? 'center' : 'right';
+          drawMixedText(doc, headers[i].th, colX + 3, topY + 3.5, {
+            fontSize: 7.5,
             bold: true,
             color: '#0f2942',
-            width: colWidths[i] - 8,
-            align: i === 0 ? 'center' : 'right',
+            width: colWidths[i] - 6,
+            align,
+          });
+          drawMixedText(doc, headers[i].en, colX + 3, topY + 14.5, {
+            fontSize: 6.2,
+            bold: false,
+            color: '#334155',
+            width: colWidths[i] - 6,
+            align,
           });
           colX += colWidths[i];
         }
-        return topY + 20;
+        return topY + hdrH;
       };
 
       y = drawScheduleSectionBanner(y);
       y = drawTableHeader(y);
 
-      const bottomLimit = pageHeight - 62;
+      const bottomLimit = pageHeight - 56;
       const rowHeight = 16;
 
       let totalPrincipalPaid = 0;
@@ -467,7 +546,7 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
           doc.addPage();
           drawWatermarkIfDraft();
           drawTopContractBanner(false);
-          y = 68;
+          y = 66;
           y = drawTableHeader(y);
         }
 
@@ -502,12 +581,12 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
         doc.addPage();
         drawWatermarkIfDraft();
         drawTopContractBanner(false);
-        y = 68;
+        y = 66;
       }
       doc.rect(marginL, y, contentWidth, 20).fillAndStroke('#eff6ff', '#1e3a5f');
       let totX = marginL;
       const totalCells = [
-        'รวม',
+        'รวม (Total)',
         '-',
         formatTHB(totalPrincipalPaid),
         formatTHB(totalInterestPaid),
@@ -515,31 +594,33 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
         '0.00',
       ];
       for (let c = 0; c < totalCells.length; c++) {
-        drawMixedText(doc, totalCells[c], totX + 4, y + 5, {
-          fontSize: 8.5,
+        drawMixedText(doc, totalCells[c], totX + 3, y + 5, {
+          fontSize: c === 0 ? 7.2 : 8.2,
           bold: true,
           color: '#0f2942',
-          width: colWidths[c] - 8,
+          width: colWidths[c] - 6,
           align: c === 0 || c === 1 ? 'center' : 'right',
         });
         totX += colWidths[c];
       }
       y += 28;
 
-      // Section 4: Signature Block (keep together on page)
-      if (y + 135 > pageHeight - 48) {
+      // Section 4: Approval and Authorization (Bilingual Signature Block)
+      if (y + 145 > pageHeight - 46) {
         doc.addPage();
         drawWatermarkIfDraft();
         drawTopContractBanner(false);
-        y = 74;
+        y = 70;
       }
 
       doc.rect(marginL, y, contentWidth, 20).fill('#0f2942');
-      drawMixedText(doc, 'ส่วนที่ 4: การตรวจสอบและลงนามอนุมัติ (Authorization & Signatures)', marginL + 8, y + 5, {
-        fontSize: 9.5,
-        bold: true,
-        color: '#ffffff',
-      });
+      drawMixedText(
+        doc,
+        'ส่วนที่ 4: การตรวจสอบและลงนามอนุมัติ (Approval and Authorization)',
+        marginL + 8,
+        y + 5,
+        { fontSize: 9, bold: true, color: '#ffffff' }
+      );
       y += 24;
 
       const sig = payload.signatures || {};
@@ -560,20 +641,22 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
           title: 'ผู้อนุมัติ (Approved By)',
           name: sig.approvedByName || (tx.transactionStatus === 'Approved' ? tx.approvedBy : ''),
           position: sig.approvedByPosition || 'Risk Management Approver',
-          date: sig.approvedDate || (tx.transactionStatus === 'Approved' ? tx.lastUpdated.slice(0, 10) : ''),
+          date:
+            sig.approvedDate ||
+            (tx.transactionStatus === 'Approved' ? tx.lastUpdated.slice(0, 10) : ''),
         },
       ];
 
       const sigGap = 10;
       const sigW = (contentWidth - sigGap * 2) / 3;
-      const sigH = 100;
+      const sigH = 112;
 
       for (let i = 0; i < sigCols.length; i++) {
         const sx = marginL + i * (sigW + sigGap);
         const col = sigCols[i];
         doc.roundedRect(sx, y, sigW, sigH, 3).fillAndStroke('#ffffff', '#cbd5e1');
         drawMixedText(doc, col.title, sx + 6, y + 8, {
-          fontSize: 8.5,
+          fontSize: 8.2,
           bold: true,
           color: '#0f2942',
           width: sigW - 12,
@@ -587,26 +670,36 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
           .strokeColor('#64748b')
           .stroke();
 
+        drawMixedText(doc, 'ชื่อ-นามสกุล (Full Name):', sx + 8, y + 54, {
+          fontSize: 7,
+          color: '#64748b',
+        });
         drawMixedText(
           doc,
-          `ชื่อ-นามสกุล: ${col.name || '................................'}`,
+          fitText(doc, col.name || '................................', sigW - 16, 7.8, true),
           sx + 8,
-          y + 56,
-          { fontSize: 8, color: '#334155' }
+          y + 63,
+          { fontSize: 7.8, bold: Boolean(col.name), color: '#0f172a' }
         );
+
+        drawMixedText(doc, 'ตำแหน่ง (Position):', sx + 8, y + 75, {
+          fontSize: 7,
+          color: '#64748b',
+        });
         drawMixedText(
           doc,
-          `ตำแหน่ง: ${col.position || '................................'}`,
-          sx + 8,
-          y + 70,
-          { fontSize: 8, color: '#334155' }
-        );
-        drawMixedText(
-          doc,
-          `วันที่: ${col.date || '......./......./.............'}`,
+          fitText(doc, col.position || '................................', sigW - 16, 7.8, false),
           sx + 8,
           y + 84,
-          { fontSize: 8, color: '#334155' }
+          { fontSize: 7.8, color: '#334155' }
+        );
+
+        drawMixedText(
+          doc,
+          `วันที่ (Date): ${col.date || '......./......./.............'}`,
+          sx + 8,
+          y + 98,
+          { fontSize: 7.5, color: '#334155' }
         );
       }
 
@@ -614,7 +707,7 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
       const pageRange = doc.bufferedPageRange();
       for (let p = 0; p < pageRange.count; p++) {
         doc.switchToPage(pageRange.start + p);
-        const footerY = pageHeight - 30;
+        const footerY = pageHeight - 28;
         doc
           .moveTo(marginL, footerY - 5)
           .lineTo(pageWidth - marginR, footerY - 5)
@@ -624,17 +717,17 @@ export async function generateRhpPdfBuffer(payload: PdfPayload): Promise<Buffer>
 
         drawMixedText(
           doc,
-          `เลขที่สัญญา: ${tx.rhpContractId}  |  สร้างเอกสารเมื่อ: ${payload.generatedAt} (Asia/Bangkok)`,
+          `เลขที่สัญญา (RHP Contract ID): ${tx.rhpContractId}  |  วันที่สร้างเอกสาร (Generated): ${payload.generatedAt} (Asia/Bangkok)`,
           marginL,
           footerY,
-          { fontSize: 7.5, color: '#64748b' }
+          { fontSize: 7.2, color: '#64748b' }
         );
         drawMixedText(
           doc,
-          `หน้า ${p + 1} / ${pageRange.count}`,
-          pageWidth - marginR - 80,
+          `หน้า (Page) ${p + 1} / ${pageRange.count}`,
+          pageWidth - marginR - 95,
           footerY,
-          { fontSize: 7.5, bold: true, color: '#334155', width: 80, align: 'right' }
+          { fontSize: 7.2, bold: true, color: '#334155', width: 95, align: 'right' }
         );
       }
 
